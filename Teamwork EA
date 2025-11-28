@@ -14347,3 +14347,59 @@ double GetMarketScore()
     return finalScore;
 }
 //----//
+double CalculateDynamicDistance()
+{
+   double atr = iATR(NULL, 0, 14, 1);
+   double distance = atr * 0.5; // 50% ของ ATR
+   return MathMax(distance, MinDistance);
+}
+
+void CheckForTrade()
+{
+   double dynamicDistance = CalculateDynamicDistance();
+   bool uptrend = IsUptrend();
+   bool downtrend = IsDowntrend();
+   
+   // เทรดตามเทรนด์
+   if(uptrend && Ask <= Low[1] - dynamicDistance * Point)
+   {
+      OpenBuyOrder();
+   }
+   
+   if(downtrend && Bid >= High[1] + dynamicDistance * Point)
+   {
+      OpenSellOrder();
+   }
+}
+void SmartRecovery()
+{
+   int total = OrdersTotal();
+   if(total <= 0) return;
+   
+   double totalProfit = CalculateTotalProfit();
+   double avgPrice = CalculateAveragePrice();
+   
+   // ถ้ามีกำไรพอสมควร ให้ปิดบางส่วน
+   if(totalProfit > RecoveryTarget)
+   {
+      ClosePartialProfits(50); // ปิด 50%
+   }
+   
+   // ถ้ายังขาดทุน แต่ตลาดเปลี่ยนทิศ
+   if(IsMarketReversing() && totalProfit < -MaxDrawdown)
+   {
+      OpenHedgePosition();
+   }
+}
+string DetectMarketCondition()
+{
+   double volatility = iATR(NULL, 0, 14, 1) / Point;
+   double spread = MarketInfo(Symbol(), MODE_SPREAD);
+   
+   if(volatility > 100 && spread < 30) 
+      return "TRENDING";
+   else if(volatility < 50 && spread < 20)
+      return "RANGING";
+   else
+      return "VOLATILE";
+}
