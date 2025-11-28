@@ -3650,6 +3650,17 @@ void OnTick()
       CloseAllPositions();
       return;
    }
+   // เรียกใช้ระบบเทรดตามสภาพตลาด
+    if(UseMarketAnalysis)
+    {
+        CheckTradeCondition();
+    }
+    else
+    {
+        // ใช้ระบบเดิมถ้าไม่เปิดใช้ Market Analysis
+        CheckTradeConditionOriginal();
+    }
+    
    
    if(!IsMarketGoodForTrading(_Symbol)) {
       if(EnableDebugMode) Print("❌ Market conditions not suitable - monitoring only");
