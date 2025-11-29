@@ -287,6 +287,7 @@ input bool   EnableRecoveryCoop     = true;    // เปิดใช้งาน
 input bool   UseMarketAnalysis    = true;     // ใช้การวิเคราะห์ตลาด
 input bool   AllowVolatileTrading = false;    // อนุญาตเทรดในตลาดผันผวน
 input bool   TradeDuringNews      = false;    // เทรดในช่วงข่าวเศรษฐกิจ
+input double MaxLossForNewTrade = -50.0;
 input int    MaxAllowedSpread     = 25;       // Spread สูงสุดที่อนุญาต
 input int    MaxRangeOrders       = 3;        // ออร์เดอร์สูงสุดในตลาด Sideway
 input double MaxRangeDrawdown     = 20.0;     // ขาดทุนสูงสุดใน Range Trading
@@ -14982,7 +14983,7 @@ bool ShouldOpenTrade(string tradeType, string marketCondition)
     if(!IsMarketGoodForTrading(_Symbol)) return false;
     
     // ตรวจสอบ Spread
-    double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
     if(spread > MaxAllowedSpread) return false;
     
     // ตรวจสอบข่าวเศรษฐกิจ
@@ -15014,26 +15015,50 @@ bool ShouldOpenTrade(string tradeType, string marketCondition)
 
 bool ShouldUseRangeStrategy()
 {
-    // ตรวจสอบว่าเหมาะสำหรับ Range Trading ไหม
-    if(CountTotalOrders() >= MaxRangeOrders)
+    // ✅ ใช้ PositionsTotal() แทน (built-in ของ MQL5)
+    if(PositionsTotal() >= MaxRangeOrders)
         return false;
         
-    if(GetCurrentProfit() < -MaxRangeDrawdown)
+    if(CalculateTotalProfit() < -MaxRangeDrawdown)
         return false;
         
     return true;
 }
 
+bool ShouldOpenNewTradeInRange()
+{
+    double profit = CalculateTotalProfit();
+    double riskPressure = CalculateRiskPressure();
+    
+    // ถ้ากำไร: เปิดออร์เดอร์ได้ตามปกติ
+    if(profit > 0) return true;
+    
+    // ถ้าขาดทุนน้อย: เปิดได้แต่ลดล็อต
+    if(profit >= -20) return true;
+    
+    // ถ้าขาดทุนปานกลาง: เปิดได้เฉพาะโอกาสดีจริงๆ
+    if(profit >= -50 && riskPressure < 0.3) return true;
+    
+    // ถ้าขาดทุนมาก: ไม่เปิดออร์เดอร์ใหม่
+    return false;
+}
 void UseRangeStrategy()
 {
     double rangeHigh = GetRangeHigh();
     double rangeLow = GetRangeLow();
     double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double totalProfit = CalculateTotalProfit();
     
-    Print("Range High: ", rangeHigh, " | Range Low: ", rangeLow, " | Current: ", currentPrice);
+    // 🔥 ใช้ฟังก์ชันนับออร์เดอร์โดยตรงในเงื่อนไข
+    int currentCountBuy = CountBuyOrders(); // ใช้ฟังก์ชันที่มีอยู่
+    int currentCountSell = CountSellOrders(); // ใช้ฟังก์ชันที่มีอยู่
+    
+    Print("Range High: ", rangeHigh, " | Range Low: ", rangeLow, " | Current: ", currentPrice, " | Profit: ", totalProfit);
+    
+    bool shouldOpenNewTrade = (totalProfit >= MaxLossForNewTrade);
     
     // ขายที่ด้านบนของ Range
-    if(currentPrice >= rangeHigh - (RangeBuffer * _Point) && CountSell < MaxTrade)
+    if((currentPrice >= rangeHigh - (RangeBuffer * _Point)) && (currentCountSell < MaxTrade) && shouldOpenNewTrade)
     {
         if(ShouldOpenTrade("SELL", "RANGING"))
         {
@@ -15041,8 +15066,8 @@ void UseRangeStrategy()
             Print("Opening SELL at range top");
         }
     }
-    // ซื้อที่ด้านล่างของ Range
-    else if(currentPrice <= rangeLow + (RangeBuffer * _Point) && CountBuy < MaxTrade)
+    // ซื้อที่ด้านล่างของ Range  
+    else if((currentPrice <= rangeLow + (RangeBuffer * _Point)) && (currentCountBuy < MaxTrade) && shouldOpenNewTrade)
     {
         if(ShouldOpenTrade("BUY", "RANGING"))
         {
@@ -15072,16 +15097,17 @@ double GetRangeLow()
 void UseVolatileMarketStrategy()
 {
     // ใช้กลยุทธ์ระมัดระวังในตลาดผันผวน
-    double reducedLot = CalculateDynamicLot() * 0.5; // ลดล็อตลง 50%
+    // ✅ ใช้ฟังก์ชันเปิดออร์เดอร์ปกติที่มีอยู่
+    // ✅ ไม่ต้องลดล็อต แต่เปิดน้อยลงโดยตรวจสอบเงื่อนไขเข้มงวด
     
-    if(CountBuy < MaxTrade && IsUptrend())
+    if(CountBuy < (MaxTrade / 2) && IsUptrend() && CalculateTotalProfit() > -20)
     {
-        OpenBuyOrderWithLot(reducedLot);
-        Print("Opening reduced BUY in volatile market");
+        OpenBuyOrder(); // ใช้ฟังก์ชันเปิดออร์เดอร์ปกติ
+        Print("Cautious BUY in volatile market");
     }
-    else if(CountSell < MaxTrade && IsDowntrend())
+    else if(CountSell < (MaxTrade / 2) && IsDowntrend() && CalculateTotalProfit() > -20)
     {
-        OpenSellOrderWithLot(reducedLot);
-        Print("Opening reduced SELL in volatile market");
+        OpenSellOrder(); // ใช้ฟังก์ชันเปิดออร์เดอร์ปกติ
+        Print("Cautious SELL in volatile market");
     }
 }
