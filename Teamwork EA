@@ -15042,6 +15042,36 @@ bool ShouldOpenNewTradeInRange()
     // ถ้าขาดทุนมาก: ไม่เปิดออร์เดอร์ใหม่
     return false;
 }
+// 🔥 คำนวณล็อตแบบง่ายๆ
+// 🔥 ใช้ฟังก์ชันคำนวณล็อตที่มีอยู่ในระบบคุณ
+double CalculateSimpleRecoveryLot(double currentProfit, string marketCondition)
+{
+    // ✅ ใช้ฟังก์ชันคำนวณล็อตที่มีอยู่จริง
+    double baseLot = CalculateSimpleLot();  // ใช้ฟังก์ชันที่มีอยู่
+    
+    // ใช้ RecoveryTarget ในการคำนวณปรับล็อต
+    if(currentProfit < -RecoveryTarget * 2) {
+        return baseLot * 1.5; // ขาดทุนหนัก → เพิ่มล็อต
+    }
+    else if(currentProfit < -RecoveryTarget) {
+        return baseLot * 1.2; // ขาดทุนปานกลาง → เพิ่มล็อตเล็กน้อย
+    }
+    else if(currentProfit > RecoveryTarget) {
+        return baseLot * 0.8; // กำไรดี → ลดล็อต
+    }
+    
+    return baseLot; // สภาพปกติ
+}
+
+// 🔥 กำหนดโหมดการเทรดแบบง่ายๆ
+string GetSimpleTradingMode(double profit)
+{
+    // ใช้ RecoveryTarget ในการกำหนดโหมด
+    if(profit < -RecoveryTarget * 2) return "AGGRESSIVE_RECOVERY";
+    if(profit < -RecoveryTarget) return "CAUTIOUS_RECOVERY"; 
+    if(profit > RecoveryTarget) return "PROFIT_PROTECTION";
+    return "NORMAL_TRADING";
+}
 void UseRangeStrategy()
 {
     double rangeHigh = GetRangeHigh();
@@ -15054,138 +15084,110 @@ void UseRangeStrategy()
     int currentCountBuy = CountBuyOrders();
     int currentCountSell = CountSellOrders();
     
-    // 🔥 รับเป้าหมายจาก Cooperative Team
-    double teamProfitTarget = GetTeamProfitTarget();
-    double teamRecoveryTarget = GetTeamRecoveryTarget();
-    bool teamAllowsNewTrades = IsTeamAllowingNewTrades();
-    
-    // 🔥 คำนวณล็อตร่วมกับทีม
-    double recoveryLot = CalculateRecoveryLotWithTeam(totalProfit, marketCondition, teamProfitTarget, teamRecoveryTarget);
-    string tradingMode = GetTradingModeWithTeam(totalProfit, teamProfitTarget);
-    
-    Print("=== COOPERATIVE RECOVERY TRADING ===");
-    Print("Team Target: ", teamProfitTarget, " | Team Recovery: ", teamRecoveryTarget);
-    Print("Market: ", marketCondition, " | Mode: ", tradingMode);
-    Print("Current P/L: ", totalProfit, " | Team Allow: ", teamAllowsNewTrades);
-    
-    // 🔥 ตรวจสอบการอนุญาตจากทีมก่อนเปิดออร์เดอร์
-    if(!teamAllowsNewTrades) {
-        Print("⏸️ Team is pausing new trades - Waiting for coordination");
-        return;
+    // 🔥 เรียกใช้ฟังก์ชัน Cooperative ที่มีอยู่จริง
+    if(EnableCooperativeSystem) {
+        ManageCooperativeStrategies();   // ✅ มีอยู่จริง
+        DisplayCooperativeDashboard();   // ✅ มีอยู่จริง
     }
+    
+    // 🔥 ใช้ RecoveryTarget เดียวกันทั้งระบบ
+    double teamProfitTarget = RecoveryTarget;  // ใช้ตัวแปรเดียวกัน
+    bool teamAllowsNewTrades = EnableCooperativeSystem;
+    
+    // 🔥 คำนวณล็อต
+    double recoveryLot = CalculateSimpleRecoveryLot(totalProfit, marketCondition);
+    string tradingMode = GetSimpleTradingMode(totalProfit);
+    
+    Print("=== COOPERATIVE TRADING ===");
+    Print("Team Target: ", teamProfitTarget, " | Market: ", marketCondition);
+    Print("Current P/L: ", totalProfit, " | Mode: ", tradingMode);
     
     bool canOpenBuy = (currentCountBuy < MaxTrade);
     bool canOpenSell = (currentCountSell < MaxTrade);
     
-    // 📈 SELL Signal - ร่วมมือกับทีม
+    // 📈 SELL Signal
     if((currentPrice >= rangeHigh - (rangeBuffer * _Point)) && canOpenSell)
     {
-        if(ShouldOpenTradeWithTeam("SELL", marketCondition, teamProfitTarget))
+        if(ShouldOpenTrade("SELL", marketCondition))
         {
             OpenSellOrderWithLot(recoveryLot);
-            ReportToTeam("OPEN_SELL", recoveryLot, totalProfit, teamProfitTarget);
-            Print("🎯 TEAM SELL | ", tradingMode, " | Lot: ", recoveryLot);
+            
+            // 🔥 รายงานไปยังระบบ Cooperative (ถ้าเปิดใช้งาน)
+            if(EnableCooperativeSystem) {
+                ExecuteRecoveryCoordination();  // ✅ มีอยู่จริง
+            }
+            
+            Print("🎯 COOP SELL | ", tradingMode, " | Lot: ", recoveryLot, " | Target: ", RecoveryTarget);
         }
     }
     
-    // 📉 BUY Signal - ร่วมมือกับทีม
+    // 📉 BUY Signal
     if((currentPrice <= rangeLow + (rangeBuffer * _Point)) && canOpenBuy)
     {
-        if(ShouldOpenTradeWithTeam("BUY", marketCondition, teamProfitTarget))
+        if(ShouldOpenTrade("BUY", marketCondition))
         {
             OpenBuyOrderWithLot(recoveryLot);
-            ReportToTeam("OPEN_BUY", recoveryLot, totalProfit, teamProfitTarget);
-            Print("🎯 TEAM BUY | ", tradingMode, " | Lot: ", recoveryLot);
+            
+            // 🔥 รายงานไปยังระบบ Cooperative (ถ้าเปิดใช้งาน)
+            if(EnableCooperativeSystem) {
+                ExecuteRecoveryCoordination();  // ✅ มีอยู่จริง
+            }
+            
+            Print("🎯 COOP BUY | ", tradingMode, " | Lot: ", recoveryLot, " | Target: ", RecoveryTarget);
         }
     }
 }
-double CalculateRecoveryLotWithTeam(double currentProfit, string marketCondition, double teamTarget, double teamRecovery)
+
+void OpenBuyOrderWithLot(double lotSize)
 {
-    double baseLot = CalculateBaseLot();
-    
-    // 🔥 ใช้เป้าหมายของทีมแทนเป้าหมายส่วนตัว
-    double personalRecoveryTarget = MathAbs(currentProfit) + RecoveryTargetProfit;
-    double teamAdjustedTarget = MathMax(personalRecoveryTarget, teamRecovery);
-    
-    double remainingTarget = teamAdjustedTarget - MathAbs(currentProfit);
-    
-    if(remainingTarget <= 0) {
-        return baseLot; // ทีมถึงเป้าหมายแล้ว
-    }
-    
-    // 🔥 คำนวณความยากตามเป้าหมายทีม
-    double recoveryDifficulty = remainingTarget / teamAdjustedTarget;
-    double teamLotMultiplier = GetTeamLotMultiplier();
-    
-    double lotMultiplier = CalculateOptimalLotMultiplier(recoveryDifficulty, marketCondition);
-    double teamAdjustedMultiplier = MathMin(lotMultiplier, teamLotMultiplier);
-    
-    double recoveryLot = baseLot * teamAdjustedMultiplier;
-    
-    Print("💰 TEAM Recovery: PersonalTarget=", personalRecoveryTarget, 
-          " | TeamTarget=", teamAdjustedTarget, " | TeamMultiplier=", teamLotMultiplier);
-    
-    return NormalizeDouble(recoveryLot, 2);
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = NormalizeDouble(lotSize, 2);
+   request.type = ORDER_TYPE_BUY;
+   request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   request.deviation = 10;
+   request.magic = 12345;
+   
+   // ✅ ตรวจสอบผลลัพธ์ของ OrderSend
+   if(OrderSend(request, result))
+   {
+      Print("✅ BUY Order opened successfully | Lot: ", lotSize, " | Ticket: ", result.order);
+   }
+   else
+   {
+      Print("❌ BUY Order failed | Error: ", GetLastError(), " | Lot: ", lotSize);
+   }
 }
 
-// 🔥 ตรวจสอบการเปิดออร์เดอร์ร่วมกับทีม
-bool ShouldOpenTradeWithTeam(string tradeType, string marketCondition, double teamTarget)
+void OpenSellOrderWithLot(double lotSize)
 {
-    // ตรวจสอบเงื่อนไขพื้นฐาน
-    if(!ShouldOpenTrade(tradeType, marketCondition)) {
-        return false;
-    }
-    
-    // 🔥 ตรวจสอบเงื่อนไขทีม
-    if(!IsTeamStrategyAligned(tradeType)) {
-        Print("⚠️ Trade type not aligned with team strategy");
-        return false;
-    }
-    
-    if(IsTeamInDrawdown() && GetTeamRiskLevel() > 0.8) {
-        Print("⚠️ Team in high risk drawdown - pausing trades");
-        return false;
-    }
-    
-    if(GetTeamPositionCount() >= GetTeamMaxPositions()) {
-        Print("⚠️ Team reached maximum position limit");
-        return false;
-    }
-    
-    return true;
-}
-
-// 🔥 กำหนดโหมดการเทรดร่วมกับทีม
-string GetTradingModeWithTeam(double profit, double teamTarget)
-{
-    string teamStatus = GetTeamStatus();
-    double teamProfit = GetTeamTotalProfit();
-    
-    if(teamProfit < teamTarget * 0.5) {
-        return "TEAM_RECOVERY | Collective Effort";
-    }
-    else if(teamProfit >= teamTarget) {
-        return "TEAM_SUCCESS | Target Achieved";
-    }
-    else if(profit < RecoveryTriggerLevel) {
-        return "PERSONAL_RECOVERY | Team Support";
-    }
-    else {
-        return "TEAM_NORMAL | Coordinated Trading";
-    }
-}
-
-// 🔥 รายงานไปยังทีม
-void ReportToTeam(string action, double lotSize, double profit, double target)
-{
-    // ส่งข้อมูลไปยังระบบ Cooperative
-    UpdateTeamTradingLog(action, lotSize, profit);
-    UpdateTeamPerformanceMetrics();
-    
-    // ตรวจสอบว่าต้องเปลี่ยนกลยุทธ์ไหม
-    if(ShouldAdjustTeamStrategy()) {
-        ExecuteTeamStrategyAdjustment();
-    }
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = NormalizeDouble(lotSize, 2);
+   request.type = ORDER_TYPE_SELL;
+   request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   request.deviation = 10;
+   request.magic = 12345;
+   
+   // ✅ ตรวจสอบผลลัพธ์ของ OrderSend
+   if(OrderSend(request, result))
+   {
+      Print("✅ SELL Order opened successfully | Lot: ", lotSize, " | Ticket: ", result.order);
+   }
+   else
+   {
+      Print("❌ SELL Order failed | Error: ", GetLastError(), " | Lot: ", lotSize);
+   }
 }
 // 🔥 สร้างฟังก์ชันนับออร์เดอร์ใหม่
 int CountBuyOrders()
