@@ -287,11 +287,21 @@ input bool   EnableRecoveryCoop     = true;    // เปิดใช้งาน
 input bool   UseMarketAnalysis    = true;     // ใช้การวิเคราะห์ตลาด
 input bool   AllowVolatileTrading = false;    // อนุญาตเทรดในตลาดผันผวน
 input bool   TradeDuringNews      = false;    // เทรดในช่วงข่าวเศรษฐกิจ
-input int    MaxAllowedSpread     = 30;       // Spread สูงสุดที่อนุญาต
+input int    MaxAllowedSpread     = 25;       // Spread สูงสุดที่อนุญาต
 input int    MaxRangeOrders       = 3;        // ออร์เดอร์สูงสุดในตลาด Sideway
 input double MaxRangeDrawdown     = 20.0;     // ขาดทุนสูงสุดใน Range Trading
-input int    RangeBuffer          = 5;        // ระยะ Buffer สำหรับ Range Trading
+//input int    RangeBuffer          = 5;        // ระยะ Buffer สำหรับ Range Trading
 input bool   UseHedgeInVolatileMarket = true; // ใช้ Hedge ในตลาดผันผวน
+input double MaxDrawdown          = 100.0;
+input int    PartialClosePct      = 50;
+//input int    MaxTotalPositions     = 10;        // จำนวนออร์เดอร์สูงสุดทั้งหมด
+//input int    RangeBuffer               = 3;         // ระยะ Buffer สำหรับ Range Trading (points)
+input int    MinTradeDistance         = 50;        // ระยะห่างขั้นต่ำระหว่างออร์เดอร์ (points)
+input bool   CheckPreviousOrderLevel  = true;      // ตรวจสอบระดับออร์เดอร์ก่อนหน้า
+//input bool UseMarketAnalysis = true; // ใช้ Market Analysis ในทุกระบบ
+input bool EnableMarketAdaptiveRecovery = true; // ปรับ Recovery ตามตลาด
+input bool AllowHighVolatilityTrading = false;
+//input int MaxAllowedSpread = 25;
 
 // --- Cooperative System Variables ---
 struct StrategyStatus {
@@ -523,11 +533,16 @@ ulong g_currentTicket;       // เปลี่ยนจาก ticket
 double g_netMomentum;        // เปลี่ยนจาก netMomentum  
 string g_missionId;          // เปลี่ยนจาก g_missionId
 
+int CountBuy = 0;
+int CountSell = 0;
+int MaxTrade = 5;
 
 double GetNetMomentum();
 bool g_EnableCounterPosition = true;
 
-
+double currentVolatility = 0;
+int currentSpread = 0;
+double currentTrendStrength = 0.5;
 
 double currentRecoveryMultiplier = 1.5;
 int currentMaxRecovery = 4;
@@ -3640,7 +3655,156 @@ void EmergencyRecoveryStop()
         }
     }
 }
+//---------MARKET ANALYSIS--------------------------//
+// 🔥 เพิ่มฟังก์ชัน Market Analysis ที่ขาดหาย
+void UpdateMarketAnalysis()
+{
+    // อัพเดทข้อมูลตลาดตลอดเวลา (ทำงานทุก Tick)
+    static datetime lastUpdate = 0;
+    if(TimeCurrent() - lastUpdate < 1) return; // อัพเดททุก 1 วินาที
+    
+    // อัพเดทข้อมูลที่ต้องการติดตามตลอดเวลา
+    UpdateVolatility();
+    UpdateSpread();
+    UpdateTrendStrength();
+    
+    lastUpdate = TimeCurrent();
+}
 
+string AnalyzeMarket()
+{
+    double volatility = GetVolatility();
+    double trendStrength = GetTrendStrength();
+    int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD); // แก้เป็น int
+    double atr = GetATR();
+    
+    // วิเคราะห์สภาพตลาด
+    if(volatility > 150 && spread > 25)
+    {
+        return "HIGH_VOLATILITY";
+    }
+    else if(trendStrength > 0.7 && volatility < 100)
+    {
+        return "TRENDING";
+    }
+    else if(trendStrength < 0.3 && volatility < 80)
+    {
+        return "RANGING";
+    }
+    else if(IsBreakoutSignal())
+    {
+        return "BREAKOUT";
+    }
+    else
+    {
+        return "NORMAL";
+    }
+}
+
+// 🔥 ฟังก์ชันสนับสนุน
+double GetVolatility()
+{
+    double atrBuffer[];
+    ArraySetAsSeries(atrBuffer, true);
+    int atrHandle = iATR(_Symbol, _Period, 14);
+    
+    if(CopyBuffer(atrHandle, 0, 0, 3, atrBuffer) > 0)
+    {
+        return atrBuffer[0] / _Point;
+    }
+    return 0;
+}
+
+double GetTrendStrength()
+{
+    double emaFastBuffer[], emaSlowBuffer[];
+    ArraySetAsSeries(emaFastBuffer, true);
+    ArraySetAsSeries(emaSlowBuffer, true);
+    
+    int emaFastHandle = iMA(_Symbol, _Period, 20, 0, MODE_EMA, PRICE_CLOSE);
+    int emaSlowHandle = iMA(_Symbol, _Period, 50, 0, MODE_EMA, PRICE_CLOSE);
+    
+    if(CopyBuffer(emaFastHandle, 0, 0, 3, emaFastBuffer) > 0 &&
+       CopyBuffer(emaSlowHandle, 0, 0, 3, emaSlowBuffer) > 0)
+    {
+        double diff = MathAbs(emaFastBuffer[0] - emaSlowBuffer[0]);
+        double priceRange = (GetDayHigh() - GetDayLow()) / _Point;
+        
+        if(priceRange > 0) return MathMin(diff / (priceRange * _Point), 1.0);
+    }
+    return 0.5;
+}
+
+double GetATR()
+{
+    double atrBuffer[];
+    ArraySetAsSeries(atrBuffer, true);
+    int atrHandle = iATR(_Symbol, _Period, 14);
+    
+    if(CopyBuffer(atrHandle, 0, 0, 3, atrBuffer) > 0)
+    {
+        return atrBuffer[0];
+    }
+    return 0;
+}
+
+bool IsBreakoutSignal()
+{
+    double highBuffer[], lowBuffer[];
+    ArraySetAsSeries(highBuffer, true);
+    ArraySetAsSeries(lowBuffer, true);
+    
+    CopyHigh(_Symbol, _Period, 0, 10, highBuffer);
+    CopyLow(_Symbol, _Period, 0, 10, lowBuffer);
+    
+    double currentHigh = highBuffer[0];
+    double currentLow = lowBuffer[0];
+    double previousHigh = highBuffer[1];
+    double previousLow = lowBuffer[1];
+    
+    // ตรวจสอบ Breakout
+    if(currentHigh > previousHigh + (GetATR() * 0.5) || 
+       currentLow < previousLow - (GetATR() * 0.5))
+    {
+        return true;
+    }
+    
+    return false;
+}
+
+double GetDayHigh()
+{
+    MqlRates rates[];
+    ArraySetAsSeries(rates, true);
+    CopyRates(_Symbol, PERIOD_D1, 0, 1, rates);
+    return rates[0].high;
+}
+
+double GetDayLow()
+{
+    MqlRates rates[];
+    ArraySetAsSeries(rates, true);
+    CopyRates(_Symbol, PERIOD_D1, 0, 1, rates);
+    return rates[0].low;
+}
+
+void UpdateVolatility()
+{
+    // อัพเดทค่าความผันผวน (ใช้ในฟังก์ชันอื่น)
+    currentVolatility = GetVolatility();
+}
+
+void UpdateSpread()
+{
+    // อัพเดทค่า Spread
+    currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+}
+
+void UpdateTrendStrength()
+{
+    // อัพเดทความแข็งแกร่งของเทรนด์
+    currentTrendStrength = GetTrendStrength();
+}
 //----------------ontick New system ---------------//
 void OnTick()
 {
@@ -3650,17 +3814,11 @@ void OnTick()
       CloseAllPositions();
       return;
    }
-   // เรียกใช้ระบบเทรดตามสภาพตลาด
-    if(UseMarketAnalysis)
-    {
-        CheckTradeCondition();
-    }
-    else
-    {
-        // ใช้ระบบเดิมถ้าไม่เปิดใช้ Market Analysis
-        CheckTradeConditionOriginal();
-    }
-    
+   
+   // 🔥 เพิ่ม Market Analysis ใน Critical Section
+   if(UseMarketAnalysis) {
+      UpdateMarketAnalysis(); // อัพเดทข้อมูลตลาดตลอดเวลา
+   }
    
    if(!IsMarketGoodForTrading(_Symbol)) {
       if(EnableDebugMode) Print("❌ Market conditions not suitable - monitoring only");
@@ -3700,11 +3858,15 @@ void ProcessNewBarOperations()
    UpdateAllSetProfits();
    CheckAndCloseHedgedPairs();
    
-    // 🔥 เพิ่ม Adaptive Logic เท่านั้น
+   // 🔥 เพิ่ม Adaptive Logic เท่านั้น
    ENUM_MARKET_REGIME currentRegime = DetectMarketRegime();
    AdjustTradingPlanForNewRegime(currentRegime);
-    ExecuteAdaptiveStrategy(); 
-    AdaptiveParameterAdjustment(); 
+   
+   // 🔥 เรียกใช้ Market Analysis ก่อนตัดสินใจใดๆ
+   if(UseMarketAnalysis) {
+      ExecuteAdaptiveStrategy(); 
+      AdaptiveParameterAdjustment(); 
+   }
    
    // 2. Cooperative System
    if(EnableCooperativeSystem) {
@@ -3753,29 +3915,42 @@ void ProcessNewBarOperations()
    ManageSmartPortfolioClosing();
 }
 
+// 🔥 ปรับปรุงระบบเทรดให้ใช้ Market Analysis
 void ExecuteNormalTrading()
 {
-   // ระบบเทรดปกติ
-   if(ShouldOpenPosition("Scalp1")) ExecuteScalp1();
-   if(ShouldOpenPosition("Trend")) ExecuteSimpleTrendScalp();
-   if(BreakoutStrategy) ExecuteAdvancedBreakout();
+   string marketCondition = "NORMAL";
+   
+   if(UseMarketAnalysis) {
+      marketCondition = AnalyzeMarket();
+   }
+   
+   // เรียกใช้แบบใหม่: ส่ง marketCondition ไปด้วย
+   if(ShouldOpenPosition("Scalp1", 0, NULL, marketCondition)) 
+      ExecuteScalp1();
+      
+   if(ShouldOpenPosition("Trend", 0, NULL, marketCondition)) 
+      ExecuteSimpleTrendScalp();
+      
+   if(ShouldOpenPosition("Breakout", 0, NULL, marketCondition)) 
+      ExecuteAdvancedBreakout();
 }
+
 
 void ExecuteRecoveryTrading()
 {
-   // ระบบเทรดโหมด Recovery (จำกัด)
-   if(ShouldOpenPosition("Scalp1") && CalculateRiskPressure() < 0.5) {
-      ExecuteScalp1();
-   }
-   if(ShouldOpenPosition("Trend") && CalculateRiskPressure() < 0.6) {
-      ExecuteSimpleTrendScalp();
+   string marketCondition = "NORMAL";
+   
+   if(UseMarketAnalysis) {
+      marketCondition = AnalyzeMarket();
    }
    
-   // Recovery Systems
-   ExecuteRecoverySystems();
-   if(EnableCooperativeSystem) {
-      ExecuteRecoveryCoordination();
-      ExecuteEssentialSystemsInRecovery();
+   // Recovery systems กับ market condition
+   if(ShouldOpenPosition("RecoveryScalp2", 0, NULL, marketCondition) && CalculateRiskPressure() < 0.5) {
+      ExecuteScalp1();
+   }
+   
+   if(ShouldOpenPosition("RecoveryScalp3", 0, NULL, marketCondition) && CalculateRiskPressure() < 0.6) {
+      ExecuteSimpleTrendScalp();
    }
 }
 //----------------ontick New system ---------------//
@@ -12934,7 +13109,7 @@ void LimitStrategyOperations(int index)
 //+------------------------------------------------------------------+
 //| Should Open Position                                            |
 //+------------------------------------------------------------------+
-bool ShouldOpenPosition(string strategyName = "", double lotSize = 0, string symbol = NULL)
+bool ShouldOpenPosition(string strategyName = "", double lotSize = 0, string symbol = NULL, string marketCondition = "NORMAL")
 {
     string sym = (symbol == NULL) ? _Symbol : symbol;
     
@@ -12967,6 +13142,16 @@ bool ShouldOpenPosition(string strategyName = "", double lotSize = 0, string sym
         return false;
     }
     
+    // 🔥 **เพิ่มส่วนนี้: ตรวจสอบ Market Analysis**
+    if(UseMarketAnalysis && strategyName != "")
+    {
+        if(!IsStrategySuitableForMarket(strategyName, marketCondition))
+        {
+            if(EnableDebugMode) Print("❌ " + strategyName + ": Strategy not suitable for market condition: " + marketCondition);
+            return false;
+        }
+    }
+    
     // 🔥 **เพิ่มส่วนนี้: ตรวจสอบเงื่อนไขเฉพาะกลยุทธ์**
     if(strategyName != "")
     {
@@ -12977,6 +13162,41 @@ bool ShouldOpenPosition(string strategyName = "", double lotSize = 0, string sym
         }
     }
     
+    return true;
+}
+// 🔥 ตรวจสอบว่าเทรดกลยุทธ์ไหนในสภาพตลาดไหน
+bool IsStrategySuitableForMarket(string strategyType, string marketCondition)
+{
+    if(strategyType == "Scalp1" || strategyType == "Scalp2" || strategyType == "Scalp3") 
+    {
+        // Scalp ทำงานได้ในทุกสภาพยกเว้นผันผวนสูง
+        return (marketCondition != "HIGH_VOLATILITY");
+    }
+    else if(strategyType == "Trend" || strategyType == "SimpleTrendScalp") 
+    {
+        // Trend ต้องการตลาดมีแนวโน้มชัดเจน
+        return (marketCondition == "TRENDING" || marketCondition == "BREAKOUT");
+    }
+    else if(strategyType == "Breakout" || strategyType == "AdvancedBreakout") 
+    {
+        // Breakout ต้องการตลาดที่กำลัง Breakout
+        return (marketCondition == "BREAKOUT" || marketCondition == "TRENDING");
+    }
+    else if(strategyType == "Recovery" || strategyType == "RecoveryScalp2" || strategyType == "RecoveryScalp3") 
+    {
+        // Recovery ทำงานได้ในทุกสภาพ แต่ระวังตลาดผันผวน
+        if(marketCondition == "HIGH_VOLATILITY") {
+            Print("⚠️ " + strategyType + ": Recovery in high volatility market - be cautious");
+        }
+        return true;
+    }
+    else if(strategyType == "Hedge" || strategyType == "CounterPosition") 
+    {
+        // Hedge ทำงานได้ดีในตลาดผันผวน
+        return (marketCondition == "HIGH_VOLATILITY" || marketCondition == "RANGING");
+    }
+    
+    // Default - อนุญาตทั้งหมดถ้าไม่รู้จัก strategy
     return true;
 }
 
@@ -14380,104 +14600,174 @@ double CalculateDynamicDistance()
    }
    return MinDistance;
 }
+bool ShouldTradeInVolatileMarket()
+{
+    // ตรวจสอบว่าเหมาะสมที่จะเทรดในตลาดผันผวนไหม
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    
+    // ถ้ายอดคงเหลือดีและมีกำไร ให้เทรดได้
+    if(equity > balance * 1.02) // มีกำไร 2%
+    {
+        return true;
+    }
+    
+    return AllowHighVolatilityTrading;
+}
 void CheckForTrade()
 {
-   double High[], Low[];
-   ArraySetAsSeries(High, true);
-   ArraySetAsSeries(Low, true);
-   
-   CopyHigh(_Symbol, _Period, 0, 3, High);
-   CopyLow(_Symbol, _Period, 0, 3, Low);
-   
-   double dynamicDistance = CalculateDynamicDistance();
-   bool uptrend = IsUptrend();
-   bool downtrend = IsDowntrend();
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
-   if(uptrend && ask <= Low[1] - dynamicDistance * _Point)
-   {
-      OpenBuyOrder();
-   }
-   
-   if(downtrend && bid >= High[1] + dynamicDistance * _Point)
-   {
-      OpenSellOrder();
-   }
+    // ใช้ฟังก์ชันวิเคราะห์ตลาดที่มีอยู่แล้วในระบบ
+    string marketCondition = AnalyzeMarket();
+    double trendStrength = GetTrendStrength();
+    double volatility = GetVolatility();
+    double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+    
+    // Debug output
+    Print("=== MARKET ANALYSIS ===");
+    Print("Condition: ", marketCondition, " | Trend Strength: ", trendStrength, " | Volatility: ", volatility, " | Spread: ", spread);
+    
+    // ตรวจสอบเงื่อนไขตลาดก่อนเทรด
+    if(!IsMarketSuitableForTrading(marketCondition, spread, volatility))
+    {
+        Print("Market not suitable for trading - Skipping trade");
+        return;
+    }
+    
+    // เทรดตามสภาพตลาด
+    if(marketCondition == "TRENDING" && trendStrength > 0.6)
+    {
+        Print("Strong Trend detected - Trading with trend");
+        
+        if(IsUptrend() && CountBuy < MaxTrade)
+        {
+            if(ShouldOpenTrade("BUY", marketCondition))
+            {
+                OpenBuyOrder();
+                Print("Opening BUY order - Strong Uptrend");
+            }
+        }
+        else if(IsDowntrend() && CountSell < MaxTrade)
+        {
+            if(ShouldOpenTrade("SELL", marketCondition))
+            {
+                OpenSellOrder();
+                Print("Opening SELL order - Strong Downtrend");
+            }
+        }
+    }
+    else if(marketCondition == "RANGING" && volatility < 80)
+    {
+        Print("Range Market detected - Using range strategy");
+        UseRangeStrategy();
+    }
+    else if(marketCondition == "BREAKOUT")
+    {
+        Print("Breakout detected - Looking for breakout opportunities");
+        if(IsBreakoutConfirmed())
+        {
+            TradeBreakout();
+        }
+    }
+    else if(marketCondition == "VOLATILE")
+    {
+        Print("Volatile market - Using cautious strategy");
+        if(volatility < 150 && ShouldTradeInVolatileMarket())
+        {
+            UseVolatileMarketStrategy();
+        }
+    }
+    else
+    {
+        Print("Waiting for better market condition: ", marketCondition);
+    }
 }
-void SmartRecovery()
+bool IsMarketSuitableForTrading(string condition, double spread, double volatility)
 {
-   int total = PositionsTotal();
-   if(total <= 0) return;
-   
-   double totalProfit = CalculateTotalProfit();
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
-   // ถ้ามีกำไรเกิน target ให้ปิดบางส่วน
-   if(totalProfit > RecoveryTarget)
-   {
-      ClosePartialProfits(50); // ปิด 50%
-   }
-   
-   // ถ้าตลาดเปลี่ยนทิศและยังขาดทุน ให้เปิด Hedge
-   if(IsMarketReversing() && totalProfit < -MaxDrawdown)
-   {
-      OpenHedgePosition();
-   }
+    // ตรวจสอบว่า Spread อยู่ในเกณฑ์ที่ยอมรับได้
+    if(spread > MaxAllowedSpread * _Point)
+    {
+        Print("Spread too high: ", spread/_Point, " points");
+        return false;
+    }
+    
+    // ตรวจสอบความผันผวน
+    if(volatility > 200 && !AllowHighVolatilityTrading)
+    {
+        Print("Volatility too high: ", volatility);
+        return false;
+    }
+    
+    // ตรวจสอบสภาพตลาดที่ไม่เหมาะสม
+    if(condition == "VOLATILE" && !AllowVolatileTrading)
+    {
+        Print("Volatile market trading disabled");
+        return false;
+    }
+    
+    // ตรวจสอบช่วงข่าวเศรษฐกิจ
+    if(IsEconomicNewsTime() && !TradeDuringNews)
+    {
+        Print("Economic news time - Trading paused");
+        return false;
+    }
+    
+    return true;
 }
 
 // ฟังก์ชัน OpenBuyOrder ที่ใช้ Lot Dynamic
 void OpenBuyOrder()
 {
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
    double lot = CalculateDynamicLot();
-   double sl = 0, tp = 0;
-   
-   // คำนวณ Stop Loss และ Take Profit
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double dynamicDistance = CalculateDynamicDistance();
-   sl = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - (dynamicDistance * 2 * _Point);
-   tp = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + (dynamicDistance * 3 * _Point);
-   
-   MqlTradeRequest request = {0};
-   MqlTradeResult result = {0};
    
    request.action = TRADE_ACTION_DEAL;
    request.symbol = _Symbol;
    request.volume = lot;
    request.type = ORDER_TYPE_BUY;
-   request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   request.sl = sl;
-   request.tp = tp;
+   request.price = ask;
+   request.sl = ask - (dynamicDistance * 2 * _Point);
+   request.tp = ask + (dynamicDistance * 3 * _Point);
    request.deviation = 10;
    request.magic = 12345;
    
-   OrderSend(request, result);
+   if(!OrderSend(request, result))
+   {
+      Print("Buy Order failed: ", GetLastError());
+   }
 }
 
 // ฟังก์ชัน OpenSellOrder ที่ใช้ Lot Dynamic
 void OpenSellOrder()
 {
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
    double lot = CalculateDynamicLot();
-   double sl = 0, tp = 0;
-   
-   // คำนวณ Stop Loss และ Take Profit
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double dynamicDistance = CalculateDynamicDistance();
-   sl = SymbolInfoDouble(_Symbol, SYMBOL_BID) + (dynamicDistance * 2 * _Point);
-   tp = SymbolInfoDouble(_Symbol, SYMBOL_BID) - (dynamicDistance * 3 * _Point);
-   
-   MqlTradeRequest request = {0};
-   MqlTradeResult result = {0};
    
    request.action = TRADE_ACTION_DEAL;
    request.symbol = _Symbol;
    request.volume = lot;
    request.type = ORDER_TYPE_SELL;
-   request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   request.sl = sl;
-   request.tp = tp;
+   request.price = bid;
+   request.sl = bid + (dynamicDistance * 2 * _Point);
+   request.tp = bid - (dynamicDistance * 3 * _Point);
    request.deviation = 10;
    request.magic = 12345;
    
-   OrderSend(request, result);
+   if(!OrderSend(request, result))
+   {
+      Print("Sell Order failed: ", GetLastError());
+   }
 }
 string DetectMarketCondition()
 {
@@ -14488,7 +14778,7 @@ string DetectMarketCondition()
    if(CopyBuffer(atrHandle, 0, 0, 3, atrBuffer) > 0)
    {
       double volatility = atrBuffer[0] / _Point;
-      double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
       
       if(volatility > 100 && spread < 30) 
          return "TRENDING";
@@ -14497,6 +14787,57 @@ string DetectMarketCondition()
    }
    return "VOLATILE";
 }
+bool IsBreakoutConfirmed()
+{
+    // ตรวจสอบการ Breakout (ตัวอย่าง)
+    double highBuffer[], lowBuffer[];
+    ArraySetAsSeries(highBuffer, true);
+    ArraySetAsSeries(lowBuffer, true);
+    
+    CopyHigh(_Symbol, _Period, 0, 5, highBuffer);
+    CopyLow(_Symbol, _Period, 0, 5, lowBuffer);
+    
+    // ตัวอย่างเงื่อนไข Breakout
+    return (highBuffer[0] > highBuffer[1] + (GetATR() * 0.3)) || 
+           (lowBuffer[0] < lowBuffer[1] - (GetATR() * 0.3));
+}
+bool IsEconomicNewsTime()
+{
+    // ตรวจสอบช่วงข่าวเศรษฐกิจ (ตัวอย่าง)
+    MqlDateTime time;
+    TimeCurrent(time);
+    
+    // ตัวอย่าง: หลีกเลี่ยงช่วง NFP (วันศุกร์แรกของเดือน 13:30 UTC)
+    if(time.day_of_week == 5 && time.hour == 13 && time.min >= 25 && time.min <= 45)
+    {
+        // ตรวจสอบว่าเป็นวันศุกร์แรกของเดือนไหม
+        if(time.day <= 7) return true;
+    }
+    
+    return false;
+}
+void TradeBreakout()
+{
+    // กลยุทธ์เทรด Breakout (ตัวอย่าง)
+    double highBuffer[], lowBuffer[];
+    ArraySetAsSeries(highBuffer, true);
+    ArraySetAsSeries(lowBuffer, true);
+    
+    CopyHigh(_Symbol, _Period, 0, 5, highBuffer);
+    CopyLow(_Symbol, _Period, 0, 5, lowBuffer);
+    
+    if(highBuffer[0] > highBuffer[1] + (GetATR() * 0.3) && CountBuy < MaxTrade)
+    {
+        OpenBuyOrder();
+        Print("BUY Breakout confirmed");
+    }
+    else if(lowBuffer[0] < lowBuffer[1] - (GetATR() * 0.3) && CountSell < MaxTrade)
+    {
+        OpenSellOrder();
+        Print("SELL Breakout confirmed");
+    }
+}
+
 void CheckTradeCondition()
 {
     // ใช้ฟังก์ชันวิเคราะห์ตลาดที่มีอยู่
@@ -14561,21 +14902,112 @@ void CheckTradeCondition()
         Print("Market unclear - Waiting for better condition");
     }
 }
-bool ShouldOpenTrade(string tradeType, string marketCondition)
+bool IsTradingTime()
 {
-    // ตรวจสอบว่าเหมาะสมที่จะเปิดออร์เดอร์ไหม
-    if(marketCondition == "VOLATILE" && !AllowVolatileTrading) 
-        return false;
+    // ตรวจสอบเวลาเทรด (ปรับตาม Timeframe ที่ใช้)
+    MqlDateTime time;
+    TimeCurrent(time);
     
-    if(Spread > MaxAllowedSpread)
+    // ตัวอย่าง: เทรดเฉพาะวันจันทร์-ศุกร์
+    if(time.day_of_week == 0 || time.day_of_week == 6) // อาทิตย์-เสาร์
         return false;
         
-    if(IsEconomicNewsTime() && !TradeDuringNews)
-        return false;
+    return true;
+}
+bool IsTooCloseToLastTrade(string tradeType)
+{
+    if(!CheckPreviousOrderLevel) return false;
+    
+    double currentPrice = (tradeType == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    for(int i = 0; i < PositionsTotal(); i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double distance = MathAbs(currentPrice - openPrice) / _Point;
+            
+            if(distance < MinTradeDistance)
+            {
+                Print("Too close to existing order: ", distance, " points");
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+bool IsTooCloseToPreviousOrders(string tradeType)
+{
+    double currentPrice = (tradeType == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    int nearbyOrders = 0;
+    
+    for(int i = 0; i < PositionsTotal(); i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double distance = MathAbs(currentPrice - openPrice) / _Point;
+            
+            // นับออร์เดอร์ที่อยู่ใกล้เกินไป
+            if(distance < MinTradeDistance)
+            {
+                nearbyOrders++;
+            }
+            
+            // ถ้ามีออร์เดอร์ในระยะที่ใกล้มากๆ
+            if(distance < (MinTradeDistance * 0.3))
+            {
+                Print("Very close to existing order: ", distance, " points");
+                return true;
+            }
+        }
+    }
+    
+    // ถ้ามีออร์เดอร์ใกล้ๆ มากกว่า 2 ออร์เดอร์
+    if(nearbyOrders >= 2)
+    {
+        Print("Too many nearby orders: ", nearbyOrders);
+        return true;
+    }
+    
+    return false;
+}
+bool ShouldOpenTrade(string tradeType, string marketCondition)
+{
+   
+    // ตรวจสอบเงื่อนไขพื้นฐาน
+    if(!IsMarketGoodForTrading(_Symbol)) return false;
+    
+    // ตรวจสอบ Spread
+    double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+    if(spread > MaxAllowedSpread) return false;
+    
+    // ตรวจสอบข่าวเศรษฐกิจ
+    if(IsEconomicNewsTime() && !TradeDuringNews) return false;
     
     // ตรวจสอบระยะห่างจากออร์เดอร์ล่าสุด
     if(IsTooCloseToLastTrade(tradeType))
+    {
+        Print("Too close to last trade - Skipping");
         return false;
+    }
+    
+    // ตรวจสอบเวลาที่เหมาะสม
+    if(!IsTradingTime())
+    {
+        Print("Outside trading hours");
+        return false;
+    }
+    
+    // ตรวจสอบจำนวนออร์เดอร์สูงสุด
+    if(PositionsTotal() >= MaxTotalPositions)
+    {
+        Print("Maximum positions reached: ", PositionsTotal());
+        return false;
+    }
     
     return true;
 }
@@ -14594,36 +15026,62 @@ bool ShouldUseRangeStrategy()
 
 void UseRangeStrategy()
 {
-    // กลยุทธ์สำหรับตลาด Sideway
     double rangeHigh = GetRangeHigh();
     double rangeLow = GetRangeLow();
     double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     
+    Print("Range High: ", rangeHigh, " | Range Low: ", rangeLow, " | Current: ", currentPrice);
+    
+    // ขายที่ด้านบนของ Range
     if(currentPrice >= rangeHigh - (RangeBuffer * _Point) && CountSell < MaxTrade)
     {
-        OpenSellOrder();
+        if(ShouldOpenTrade("SELL", "RANGING"))
+        {
+            OpenSellOrder();
+            Print("Opening SELL at range top");
+        }
     }
+    // ซื้อที่ด้านล่างของ Range
     else if(currentPrice <= rangeLow + (RangeBuffer * _Point) && CountBuy < MaxTrade)
     {
-        OpenBuyOrder();
+        if(ShouldOpenTrade("BUY", "RANGING"))
+        {
+            OpenBuyOrder();
+            Print("Opening BUY at range bottom");
+        }
     }
 }
+// 🔥 เพิ่มฟังก์ชันที่ UseRangeStrategy() เรียกใช้
+double GetRangeHigh()
+{
+    double highBuffer[];
+    ArraySetAsSeries(highBuffer, true);
+    CopyHigh(_Symbol, _Period, 0, 20, highBuffer); // ใช้ 20 แท่งย้อนหลัง
+    
+    return highBuffer[ArrayMaximum(highBuffer, 0, 20)];
+}
 
+double GetRangeLow()
+{
+    double lowBuffer[];
+    ArraySetAsSeries(lowBuffer, true);
+    CopyLow(_Symbol, _Period, 0, 20, lowBuffer); // ใช้ 20 แท่งย้อนหลัง
+    
+    return lowBuffer[ArrayMinimum(lowBuffer, 0, 20)];
+}
 void UseVolatileMarketStrategy()
 {
-    // กลยุทธ์สำหรับตลาดผันผวน
-    if(UseHedgeInVolatileMarket)
+    // ใช้กลยุทธ์ระมัดระวังในตลาดผันผวน
+    double reducedLot = CalculateDynamicLot() * 0.5; // ลดล็อตลง 50%
+    
+    if(CountBuy < MaxTrade && IsUptrend())
     {
-        // ใช้ Hedge เพื่อลดความเสี่ยง
-        OpenHedgePosition();
+        OpenBuyOrderWithLot(reducedLot);
+        Print("Opening reduced BUY in volatile market");
     }
-    else
+    else if(CountSell < MaxTrade && IsDowntrend())
     {
-        // ลดขนาดล็อตในตลาดผันผวน
-        double reducedLot = CalculateReducedLot();
-        if(CountBuy < MaxTrade)
-        {
-            OpenBuyOrderWithLot(reducedLot);
-        }
+        OpenSellOrderWithLot(reducedLot);
+        Print("Opening reduced SELL in volatile market");
     }
 }
