@@ -74,17 +74,22 @@ enum ENUM_SYSTEM_MODE
    MODE_HIGH_RISK
 };
 // 🔥 เพิ่มฟังก์ชันใหม่เท่านั้น - ใช้ของเดิมเป็นฐาน
-enum ENUM_MARKET_REGIME {
-   MARKET_REGIME_RANGING_CALM,        // 0
-   MARKET_REGIME_TRENDING_STRONG,     // 1  
-   MARKET_REGIME_BREAKOUT_POTENTIAL,  // 2
-   MARKET_REGIME_RANGING_VOLATILE,    // 3 (เพิ่มใหม่)
-   MARKET_REGIME_TRENDING_WEAK,       // 4 (เพิ่มใหม่)
-   MARKET_REGIME_NORMAL               // 5
+enum ENUM_MARKET_REGIME_DETAILED
+{
+    MARKET_REGIME_UNKNOWN = 0,
+    MARKET_REGIME_RANGING_CALM = 1,
+    MARKET_REGIME_RANGING_VOLATILE = 2,
+    MARKET_REGIME_TRENDING_WEAK = 3,      // แยกเป็น Weak/Strong
+    MARKET_REGIME_TRENDING_STRONG = 4,
+    MARKET_REGIME_BREAKOUT_POTENTIAL = 5,
+    MARKET_REGIME_HIGH_VOLATILITY = 6,
+    MARKET_REGIME_NEWS_EVENT = 7
 };
+
 ENUM_MARKET_REGIME currentMarketRegime = MARKET_REGIME_RANGING_CALM;
 ENUM_SYSTEM_MODE SystemMode = MODE_NORMAL;
-ENUM_MARKET_REGIME g_currentRegime = MARKET_REGIME_NORMAL;
+ENUM_MARKET_REGIME g_currentRegime = MARKET_REGIME_RANGING_CALM;      // ✅ global
+double currentVolatility = 0;         
 
 
 // --- Magic Numbers ---
@@ -815,86 +820,202 @@ void ExecuteSimpleTrendScalp(ENUM_MARKET_REGIME regime = MARKET_REGIME_NORMAL)
     }
 }
 
-// 🔥 ฟังก์ชัน Helper สำหรับ Trend Scalp ตาม Regime
-bool IsTrendScalpAllowedInRegime(ENUM_MARKET_REGIME regime)
+
+
+int GetTrendScalpMaxPositionsForRegime(ENUM_MARKET_REGIME regime)
+{
+    int baseMax = Scalp1_MaxPositions;
+    
+    switch(regime)
+    {
+        case MARKET_REGIME_TRENDING:
+            // ใช้ trend strength จากฟังก์ชันของคุณ
+            int trendDirection = GetTrendDirection();
+            double trendStrengthValue = 0;
+            
+            if(trendDirection == DIRECTION_UP) {
+                trendStrengthValue = GetTrendStrength(DIRECTION_UP);
+            } else if(trendDirection == DIRECTION_DOWN) {
+                trendStrengthValue = GetTrendStrength(DIRECTION_DOWN);
+            }
+            
+            if(trendStrengthValue == 30.0) { // Strong trend
+                return MathMin(baseMax + 2, 8);
+            } 
+            else if(trendStrengthValue == 20.0) { // Moderate trend
+                return MathMin(baseMax + 1, 6);
+            } 
+            else { // Weak or no trend (DIRECTION_NEUTRAL)
+                return baseMax;
+            }
+            
+        case MARKET_REGIME_RANGING_CALM:
+        case MARKET_REGIME_RANGING_VOLATILE:
+            return MathMax(1, baseMax / 2);
+            
+        case MARKET_REGIME_BREAKOUT_POTENTIAL:
+            return MathMax(1, (int)(baseMax * 0.6));
+            
+        case MARKET_REGIME_HIGH_VOLATILITY:
+            return MathMax(1, (int)(baseMax * 0.3));
+            
+        default:
+            return baseMax;
+    }
+}
+int GetTrendScalpMaxPositionsWithStrength(ENUM_MARKET_REGIME regime)
+{
+    int baseMax = Scalp1_MaxPositions;
+    double normalizedStrength = GetTrendStrengthNormalized();
+    
+    switch(regime)
+    {
+        case MARKET_REGIME_TRENDING:
+            if(normalizedStrength == 1.0) {
+                return MathMin(baseMax + 2, 8); // Strong
+            } else if(normalizedStrength == 0.5) {
+                return MathMin(baseMax + 1, 6); // Moderate
+            } else {
+                return baseMax; // Weak or neutral
+            }
+            
+        case MARKET_REGIME_RANGING_CALM:
+            return MathMax(1, (int)(baseMax * 0.7));
+            
+        case MARKET_REGIME_RANGING_VOLATILE:
+            return MathMax(1, (int)(baseMax * 0.5));
+            
+        case MARKET_REGIME_BREAKOUT_POTENTIAL:
+            return MathMax(1, (int)(baseMax * 0.6));
+            
+        case MARKET_REGIME_HIGH_VOLATILITY:
+            return MathMax(1, (int)(baseMax * 0.3));
+            
+        default:
+            return baseMax;
+    }
+}
+// 🔥 ฟังก์ชันสำหรับตรวจสอบว่าอยู่ใน uptrend หรือไม่
+bool IsInUptrend()
+{
+    double strength = GetTrendStrength(DIRECTION_UP);
+    return (strength > 0);
+}
+
+// 🔥 ฟังก์ชันสำหรับตรวจสอบว่าอยู่ใน downtrend หรือไม่
+bool IsInDowntrend()
+{
+    double strength = GetTrendStrength(DIRECTION_DOWN);
+    return (strength > 0);
+}
+
+// 🔥 ฟังก์ชันสำหรับตรวจสอบว่าตลาดไม่มี trend
+bool IsMarketNeutral()
+{
+    return (GetTrendDirection() == DIRECTION_NEUTRAL);
+}
+void ExecuteStrategyByRegime(ENUM_MARKET_REGIME regime, int trendDirection)
 {
     switch(regime)
     {
         case MARKET_REGIME_RANGING_CALM:
+            UseRangeStrategy(MARKET_REGIME_RANGING_CALM);
+            break;
+            
         case MARKET_REGIME_RANGING_VOLATILE:
-            // ใน sideways market ไม่ควรใช้ trend strategy
-            return EnableTrendScalpInRange;
+            if(ShouldTradeInVolatileMarket(MARKET_REGIME_RANGING_VOLATILE)) {
+                ExecuteVolatileMarketStrategy();
+            }
+            break;
             
-        case MARKET_REGIME_TRENDING_STRONG:
-            // ในเทรนด์แรง เหมาะสำหรับ trend strategy
-            return true;
-            
-        case MARKET_REGIME_TRENDING_WEAK:
-            // ในเทรนด์อ่อน อาจต้องใช้ stricter rules
-            return EnableTrendScalpInWeakTrend;
+        case MARKET_REGIME_TRENDING:
+            // เรียกใช้ trend strategy พร้อมส่ง direction
+            UseTrendStrategyWithDirection(trendDirection);
+            break;
             
         case MARKET_REGIME_BREAKOUT_POTENTIAL:
-            // ใน breakout อาจไม่เหมาะกับ trend scalp
-            return EnableTrendScalpInBreakout;
+            if(IsBreakoutConfirmed(MARKET_REGIME_BREAKOUT_POTENTIAL)) {
+                UseBreakoutStrategy();
+            }
+            break;
             
-        case MARKET_REGIME_NORMAL:
-        default:
-            return true;
+        case MARKET_REGIME_HIGH_VOLATILITY:
+            Print("⚠️ High volatility - Trading paused");
+            break;
     }
 }
-int GetTrendScalpMaxPositionsForRegime(ENUM_MARKET_REGIME regime)
+void UseTrendStrategyWithDirection(int trendDirection)
 {
-    int baseMax = Scalp1_MaxPositions; // ใช้ค่าเดียวกับ Scalp1 หรืออาจสร้างแยก
+    if(trendDirection == DIRECTION_UP) {
+        Print("📈 Executing UPTREND strategy");
+        // โค้ดสำหรับ uptrend
+    } else if(trendDirection == DIRECTION_DOWN) {
+        Print("📉 Executing DOWNTREND strategy");
+        // โค้ดสำหรับ downtrend
+    } else {
+        Print("➡️ Market is neutral, using normal trend strategy");
+        // โค้ดสำหรับ neutral market
+    }
+}
+int GetTrendScalpMaxPositionsForRegimeDetailed(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    int baseMax = Scalp1_MaxPositions;
     
     switch(regime)
     {
         case MARKET_REGIME_TRENDING_STRONG:
-            // ในเทรนด์แรง อาจเปิดได้มากกว่า
             return MathMin(baseMax + 2, 8);
             
+        case MARKET_REGIME_TRENDING_WEAK:
+            return MathMin(baseMax + 1, 6);
+            
         case MARKET_REGIME_RANGING_CALM:
+            return MathMax(1, (int)(baseMax * 0.7));
+            
         case MARKET_REGIME_RANGING_VOLATILE:
-            // ใน sideways เปิดน้อยลง
-            return MathMax(1, baseMax / 2);
+            return MathMax(1, (int)(baseMax * 0.5));
             
         case MARKET_REGIME_BREAKOUT_POTENTIAL:
-            // ใน breakout ระวัง
             return MathMax(1, (int)(baseMax * 0.6));
             
-        case MARKET_REGIME_TRENDING_WEAK:
-            // ในเทรนด์อ่อน ปกติ
-            return baseMax;
+        case MARKET_REGIME_HIGH_VOLATILITY:
+        case MARKET_REGIME_NEWS_EVENT:
+            return MathMax(1, (int)(baseMax * 0.3));
             
         default:
-            return baseMax;
+            return MathMax(1, (int)(baseMax * 0.8));
     }
 }
-double GetTrendScalpLotMultiplierForRegime(ENUM_MARKET_REGIME regime)
+int GetTrendScalpMaxPositionsWithTrendStrength(ENUM_MARKET_REGIME regime, double trendStrength = 0)
 {
+    int baseMax = Scalp1_MaxPositions;
+    
     switch(regime)
     {
-        case MARKET_REGIME_TRENDING_STRONG:
-            // ในเทรนด์แรง เพิ่ม lot ได้
-            return 1.3;
-            
-        case MARKET_REGIME_RANGING_VOLATILE:
-            // ในตลาดผันผวน ลด lot
-            return 0.6;
+        case MARKET_REGIME_TRENDING:
+            // ปรับตามความแรงของเทรนด์
+            if(trendStrength > 0.7) {
+                return MathMin(baseMax + 2, 8); // แรง
+            } else if(trendStrength > 0.3) {
+                return MathMin(baseMax + 1, 6); // ปานกลาง
+            } else {
+                return baseMax; // อ่อน
+            }
             
         case MARKET_REGIME_RANGING_CALM:
-            // ใน sideways เงียบ ปกติ
-            return 0.9;
+            return MathMax(1, (int)(baseMax * 0.7));
+            
+        case MARKET_REGIME_RANGING_VOLATILE:
+            return MathMax(1, (int)(baseMax * 0.5));
             
         case MARKET_REGIME_BREAKOUT_POTENTIAL:
-            // ใน breakout ระวัง
-            return 0.7;
+            return MathMax(1, (int)(baseMax * 0.6));
             
-        case MARKET_REGIME_TRENDING_WEAK:
-            // ในเทรนด์อ่อน ลดนิดหน่อย
-            return 0.8;
+        case MARKET_REGIME_HIGH_VOLATILITY:
+            return MathMax(1, (int)(baseMax * 0.3));
             
         default:
-            return 1.0;
+            return baseMax;
     }
 }
 bool ShouldTradeBasedOnTrend(ENUM_TREND_DIRECTION trend, double strength, ENUM_MARKET_REGIME regime)
@@ -1511,19 +1632,43 @@ double GetKeyLevelForBreakout(int trend)
 //+------------------------------------------------------------------+
 //| Calculate Total Profit - Fixed implementation                  |
 //+------------------------------------------------------------------+
-double CalculateTotalProfit()
+double CalculateTotalProfit(int specificMagic = -1)
 {
-   double total = 0;
-   for(int i = 0; i < PositionsTotal(); i++)
-   {
-      if(PositionGetSymbol(i) == _Symbol)
-      {
-         total += PositionGetDouble(POSITION_PROFIT);
-      }
-   }
-   return total;
+    double totalProfit = 0;
+    
+    long magicList[] = {
+        MAGIC_TEST_SIMPLE, MAGIC_TREND_SCALP,
+        MAGIC_SCALP1, MAGIC_SCALP1_HF, MAGIC_SCALP2, MAGIC_SCALP3,
+        MAGIC_RECOVERY, MAGIC_INDIVIDUAL, MAGIC_ORPHAN,
+        MAGIC_HEDGE, MAGIC_AI_NEWS, MAGIC_AI_TREND,
+        MAGIC_BREAKOUT, MAGIC_COUNTER, MAGIC_MAIN
+    };
+    
+    for(int i = 0; i < PositionsTotal(); i++) {
+        string symbol = PositionGetSymbol(i);
+        if(symbol == _Symbol) {
+            ulong magic = PositionGetInteger(POSITION_MAGIC);
+            
+            bool magicMatch = false;
+            if(specificMagic == -1) {
+                for(int m = 0; m < ArraySize(magicList); m++) {
+                    if(magic == (ulong)magicList[m]) {
+                        magicMatch = true;
+                        break;
+                    }
+                }
+            } else {
+                magicMatch = (magic == (ulong)specificMagic);
+            }
+            
+            if(magicMatch) {
+                totalProfit += PositionGetDouble(POSITION_PROFIT);
+            }
+        }
+    }
+    
+    return NormalizeDouble(totalProfit, 2);
 }
-
 
 //+------------------------------------------------------------------+
 //| Open Trend Scalp Position                                       |
@@ -4434,7 +4579,7 @@ double GetMAValue(string symbol, ENUM_TIMEFRAMES tf, int period, int shift, ENUM
     IndicatorRelease(maHandle);
     return maValue[0];
 }
-double GetTrendStrength(int direction = DIRECTION_DOWN)
+double GetTrendStrength(int direction = DIRECTION_NEUTRAL)
 {
     // Simple method using moving averages
     double ma20 = GetMAValue(Symbol(), PERIOD_CURRENT, 20, 0, MODE_EMA);
@@ -4462,7 +4607,7 @@ double GetTrendStrength(int direction = DIRECTION_DOWN)
             return 0;    // Weak or no trend
     }
     
-    return 0;
+    return 0; // DIRECTION_NEUTRAL หรือค่าอื่นๆ
 }
 
 
@@ -4553,6 +4698,9 @@ void OnTick()
    if(UseMarketAnalysis) 
    {
       UpdateMarketAnalysis(); // อัพเดทข้อมูลตลาดตลอดเวลา
+      
+      // อัพเดท currentVolatility
+      currentVolatility = CalculateCurrentVolatility();
    }
    
    if(!IsMarketGoodForTrading(_Symbol)) 
@@ -4572,33 +4720,95 @@ void OnTick()
    
    // ===== 🟡 BAR DETECTION =====
    datetime currentBar = iTime(_Symbol, PERIOD_M1, 0);
-   newBar = (currentBar != lastBarTime); // ✅ ใช้ตัวแปร global
+   newBar = (currentBar != lastBarTime);
    
    // ===== 🟢 LIGHT SYSTEMS (ทำงานทุก Tick) =====
    ManageScalp3PairClosing();  // ระบบเบา
    RunSafetyCheck();           // ระบบเบา
    
-   // ===== 🔥 MARKET REGIME DETECTION (ทุก Tick) =====
-   static ENUM_MARKET_REGIME lastRegime = MARKET_REGIME_NORMAL;
-   ENUM_MARKET_REGIME currentRegime = DetectMarketRegime();
+   // 🔥 ปรับปรุง: Market Regime Detection (ทุก Tick)
+   static ENUM_MARKET_REGIME lastRegime = MARKET_REGIME_UNKNOWN;
+   ENUM_MARKET_REGIME currentRegime = AnalyzeMarketCondition(); // ใช้ฟังก์ชันที่มีอยู่
    
    // ถ้าสภาพตลาดเปลี่ยน
    if(currentRegime != lastRegime)
    {
-      if(EnableDebugMode) Print("🔄 Market regime changed from " + EnumToString(lastRegime) + 
-                                " to " + EnumToString(currentRegime));
+      string fromRegime = "Unknown";
+      string toRegime = "Unknown";
+      
+      // แปลง enum เป็น string
+      switch(lastRegime) {
+         case MARKET_REGIME_RANGING_CALM: fromRegime = "RANGING_CALM"; break;
+         case MARKET_REGIME_RANGING_VOLATILE: fromRegime = "RANGING_VOLATILE"; break;
+         case MARKET_REGIME_TRENDING: fromRegime = "TRENDING"; break;
+         case MARKET_REGIME_BREAKOUT_POTENTIAL: fromRegime = "BREAKOUT_POTENTIAL"; break;
+         case MARKET_REGIME_HIGH_VOLATILITY: fromRegime = "HIGH_VOLATILITY"; break;
+      }
+      
+      switch(currentRegime) {
+         case MARKET_REGIME_RANGING_CALM: toRegime = "RANGING_CALM"; break;
+         case MARKET_REGIME_RANGING_VOLATILE: toRegime = "RANGING_VOLATILE"; break;
+         case MARKET_REGIME_TRENDING: toRegime = "TRENDING"; break;
+         case MARKET_REGIME_BREAKOUT_POTENTIAL: toRegime = "BREAKOUT_POTENTIAL"; break;
+         case MARKET_REGIME_HIGH_VOLATILITY: toRegime = "HIGH_VOLATILITY"; break;
+      }
+      
+      if(EnableDebugMode) Print("🔄 Market regime changed from " + fromRegime + 
+                                " to " + toRegime);
+      
+      // ปรับ Strategy ตาม Regime ใหม่
       AdjustStrategyByRegime(currentRegime);
+      
+      // อัพเดท position limits ตาม regime
+      int maxPositions = GetTrendScalpMaxPositionsForRegime(currentRegime);
+      MaxTrade = maxPositions;
+      
+      Print("📊 Market Regime: " + toRegime + " | Max Positions: " + IntegerToString(maxPositions));
+      
       lastRegime = currentRegime;
+   }
+   
+   // 🔥 Trend Analysis (ทุก Tick)
+   static int lastTrendDirection = DIRECTION_NEUTRAL;
+   int currentTrendDirection = GetTrendDirection();
+   
+   if(currentTrendDirection != lastTrendDirection)
+   {
+      string trendStr = "";
+      switch(currentTrendDirection) {
+         case DIRECTION_UP: trendStr = "UP"; break;
+         case DIRECTION_DOWN: trendStr = "DOWN"; break;
+         case DIRECTION_NEUTRAL: trendStr = "NEUTRAL"; break;
+      }
+      
+      if(EnableDebugMode) Print("📈 Trend direction changed to: " + trendStr);
+      lastTrendDirection = currentTrendDirection;
    }
    
    // ===== 🎯 NEW BAR OPERATIONS =====
    if(newBar) 
    {
+      if(EnableDebugMode) Print("--- NEW BAR DETECTED ---");
+      
       ProcessNewBarOperations(currentRegime); // ✅ ส่ง currentRegime ไปด้วย
+      
+      // 🔥 Execute trading strategies based on market regime
+      ExecuteRegimeBasedStrategies(currentRegime, currentTrendDirection);
+      
       lastBarTime = currentBar;
    }
+   
+   // 🔥 Position Management (ทุก Tick)
+   ManageOpenPositionsByRegime(currentRegime);
+   
+   // 🔥 Display Dashboard (ทุก Tick หรือเฉพาะ newBar)
+   static datetime lastDashboardUpdate = 0;
+   if((TimeCurrent() - lastDashboardUpdate) >= 5 || newBar)
+   {
+      DisplayMarketDashboard(currentRegime, currentTrendDirection);
+      lastDashboardUpdate = TimeCurrent();
+   }
 }
-
 void ProcessNewBarOperations(ENUM_MARKET_REGIME currentRegime)
 {
    // ✅ ระบบหนักทั้งหมดย้ายมาทำที่นี่ (แค่แท่งใหม่)
@@ -4757,7 +4967,137 @@ void ExecuteRecoveryTrading(ENUM_MARKET_REGIME currentRegime)
       ExecuteSimpleTrendScalp(currentRegime);
    }
 }
+// 🔥 ฟังก์ชัน ExecuteRegimeBasedStrategies
+void ExecuteRegimeBasedStrategies(ENUM_MARKET_REGIME regime, int trendDirection)
+{
+   switch(regime)
+   {
+      case MARKET_REGIME_RANGING_CALM:
+         if(ShouldTradeInRangeMarket()) {
+            UseRangeStrategy(MARKET_REGIME_RANGING_CALM);
+         }
+         break;
+         
+      case MARKET_REGIME_RANGING_VOLATILE:
+         // ตรวจสอบ volatility ก่อนเทรด
+         if(currentVolatility < 150 && ShouldTradeInVolatileMarket(MARKET_REGIME_RANGING_VOLATILE)) {
+            ExecuteVolatileMarketStrategy();
+         }
+         break;
+         
+      case MARKET_REGIME_TRENDING:
+         if(ShouldTradeInTrendMarket(trendDirection)) {
+            UseTrendStrategyWithDirection(trendDirection);
+         }
+         break;
+         
+      case MARKET_REGIME_BREAKOUT_POTENTIAL:
+         if(IsBreakoutConfirmed(MARKET_REGIME_BREAKOUT_POTENTIAL)) {
+            UseBreakoutStrategy();
+         }
+         break;
+         
+      case MARKET_REGIME_HIGH_VOLATILITY:
+         // ปรับ position size ให้เล็กลงหรือหยุดเทรด
+         AdjustPositionSizeForHighVolatility();
+         Print("⚠️ HIGH VOLATILITY - Reduced position sizes");
+         break;
+         
+      case MARKET_REGIME_UNKNOWN:
+      default:
+         // ใช้ strategy มาตรฐานหรือหยุดเทรด
+         UseDefaultStrategy();
+         break;
+   }
+}
+void ManageOpenPositionsByRegime(ENUM_MARKET_REGIME regime)
+{
+   switch(regime)
+   {
+      case MARKET_REGIME_HIGH_VOLATILITY:
+         // ปรับ SL/TP ให้กว้างขึ้นในตลาด volatile
+         AdjustStopLossForVolatility();
+         break;
+         
+      case MARKET_REGIME_TRENDING:
+         // ใน trending market อาจใช้ trailing stop
+         ApplyTrailingStopForTrend();
+         break;
+         
+      case MARKET_REGIME_RANGING_CALM:
+         // ใน ranging market ใช้ tight stop
+         ApplyTightStopLoss();
+         break;
+   }
+}
+
+// 🔥 ฟังก์ชัน AdjustStrategyByRegime
+void AdjustStrategyByRegime(ENUM_MARKET_REGIME regime)
+{
+   switch(regime)
+   {
+      case MARKET_REGIME_RANGING_VOLATILE:
+         // ปรับค่าสำหรับ volatile market
+         if(EnableAutoAdjustment) {
+            Print("⚡ Adjusting strategy for VOLATILE market");
+            // ปรับค่า risk, lot size, etc.
+         }
+         break;
+         
+      case MARKET_REGIME_HIGH_VOLATILITY:
+         Print("⚠️ Switching to SAFE MODE for high volatility");
+         EnableSafeMode = true;
+         break;
+         
+      case MARKET_REGIME_TRENDING:
+         Print("📈 Switching to TREND FOLLOWING mode");
+         EnableSafeMode = false;
+         break;
+   }
+}
+// 🔥 ฟังก์ชัน DisplayMarketDashboard
+void DisplayMarketDashboard(ENUM_MARKET_REGIME regime, int trendDirection)
+{
+   string regimeStr = "";
+   switch(regime) {
+      case MARKET_REGIME_RANGING_CALM: regimeStr = "RANGING_CALM"; break;
+      case MARKET_REGIME_RANGING_VOLATILE: regimeStr = "RANGING_VOLATILE"; break;
+      case MARKET_REGIME_TRENDING: regimeStr = "TRENDING"; break;
+      case MARKET_REGIME_BREAKOUT_POTENTIAL: regimeStr = "BREAKOUT_POTENTIAL"; break;
+      case MARKET_REGIME_HIGH_VOLATILITY: regimeStr = "HIGH_VOLATILITY"; break;
+      default: regimeStr = "UNKNOWN"; break;
+   }
+   
+   string trendStr = "";
+   switch(trendDirection) {
+      case DIRECTION_UP: trendStr = "UP"; break;
+      case DIRECTION_DOWN: trendStr = "DOWN"; break;
+      case DIRECTION_NEUTRAL: trendStr = "NEUTRAL"; break;
+   }
+   
+   Print("=== MARKET DASHBOARD ===");
+   Print("Regime: " + regimeStr);
+   Print("Trend: " + trendStr);
+   Print("Volatility: " + DoubleToString(currentVolatility, 2));
+   Print("Max Positions: " + IntegerToString(MaxTrade));
+   Print("Total P/L: " + DoubleToString(CalculateTotalProfit(), 2));
+   Print("Active Positions: " + IntegerToString(PositionsTotal()));
+   Print("=======================");
+}
+
 //----------------ontick New system ---------------//
+// 🔥 ฟังก์ชัน CalculateCurrentVolatility (ถ้ายังไม่มี)
+double CalculateCurrentVolatility()
+{
+   double atrValue = iATR(_Symbol, _Period, 14, 0);
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   if(currentPrice == 0) return 0;
+   
+   double volatilityPercent = (atrValue / currentPrice) * 10000;
+   
+   return NormalizeDouble(volatilityPercent, 2);
+}
 //+------------------------------------------------------------------+
 //| Open Test Position                                              |
 //+------------------------------------------------------------------+
@@ -18241,70 +18581,51 @@ int CountAllOrders()
 }
 bool ShouldTradeInVolatileMarket(int marketRegime = -1)
 {
-    // 🔥 ใช้ค่า currentVolatility จาก Global variable ที่ประกาศไว้แล้วที่บรรทัด 566
-    // ไม่ต้องประกาศ extern หรือ double ใหม่
-    
-    // 🔥 หากได้รับพารามิเตอร์ให้ตรวจสอบว่าเป็น volatile market หรือไม่
+    // ตรวจสอบเฉพาะเมื่อเป็น volatile market
     if(marketRegime == MARKET_REGIME_RANGING_VOLATILE) {
-        Print("⚡ VOLATILE MARKET DETECTED - Checking trading conditions...");
-        Print("   Current Volatility: ", currentVolatility);
+        Print("⚡ VOLATILE MARKET DETECTED");
         
-        // ใช้ค่า volatility จาก global variable
-        double maxVolatility = 150; // ค่าที่กำหนดไว้ในโค้ด
-        
-        if(currentVolatility >= maxVolatility) {
-            Print("⚠️ Volatility too high: ", currentVolatility, " > ", maxVolatility, " - Skipping trade");
+        // 1. ตรวจสอบ volatility
+        if(currentVolatility >= 150) {
+            Print("   ❌ Volatility too high: ", currentVolatility);
             return false;
         }
         
-        // ตรวจสอบเงื่อนไขเพิ่มเติมสำหรับ volatile market
-        bool hasSufficientDistance = CheckOrderDistance();
-        bool isSafeTime = IsSafeTradingTime();
-        bool riskAcceptable = CheckRiskManagement(currentVolatility); // ส่งค่า volatility ไปด้วย
+        // 2. ตรวจสอบจำนวนออเดอร์
+        int buyOrders = CountBuyOrders();
+        int sellOrders = CountSellOrders();
+        int totalOrders = buyOrders + sellOrders;
         
-        Print("   Distance OK: ", hasSufficientDistance, " | Safe Time: ", isSafeTime, " | Risk OK: ", riskAcceptable);
+        if(totalOrders >= MaxTrade) {
+            Print("   ❌ Maximum orders reached: ", totalOrders);
+            return false;
+        }
         
-        return hasSufficientDistance && isSafeTime && riskAcceptable;
+        // 3. ตรวจสอบ profit
+        double profit = CalculateTotalProfit();
+        if(profit < -100) {
+            Print("   ❌ Loss too high: ", profit);
+            return false;
+        }
+        
+        // 4. ตรวจสอบระยะห่างออเดอร์ (ถ้าต้องการ)
+        if(buyOrders > 0 && sellOrders > 0) {
+            double avgBuy = GetAverageBuyPrice();
+            double avgSell = GetAverageSellPrice();
+            if(avgBuy > 0 && avgSell > 0) {
+                double distance = MathAbs(avgBuy - avgSell) / _Point;
+                if(distance < 50) {
+                    Print("   ❌ Order distance too small: ", distance);
+                    return false;
+                }
+            }
+        }
+        
+        Print("   ✅ Conditions met for volatile market");
+        return true;
     }
     
-    // 🔥 หากไม่ได้ระบุพารามิเตอร์หรือเป็นค่าอื่น ใช้ตรรกะเดิม
-    static int lastTradeBar = 0;
-    int currentBar = iBars(_Symbol, _Period);
-    
-    if(currentBar <= lastTradeBar) {
-        return false; // ป้องกันการเทรดซ้ำในแท่งเดียวกัน
-    }
-    
-    // ตรวจสอบเงื่อนไขต่าง ๆ (ใช้ค่า global volatility)
-    double totalProfit = CalculateTotalProfit();
-    int totalOrders = CountAllOrders();
-    
-    // ตัวอย่างเงื่อนไข
-    if(totalProfit < -100) {
-        Print("⚠️ Loss too high: ", totalProfit, " - Skipping volatile market trade");
-        return false;
-    }
-    
-    if(totalOrders >= MaxTrade) {
-        Print("⚠️ Maximum orders reached: ", totalOrders, " - Skipping trade");
-        return false;
-    }
-    
-    // ตรวจสอบ volatility (ใช้ค่าจาก global)
-    if(currentVolatility > 150) {
-        Print("⚠️ Volatility too high: ", currentVolatility, " - Skipping trade");
-        return false;
-    }
-    
-    // ตรวจสอบเวลาและเงื่อนไขอื่นๆ
-    if(!IsSafeTradingTime()) {
-        Print("⚠️ Not safe trading time - Skipping trade");
-        return false;
-    }
-    
-    lastTradeBar = currentBar;
-    Print("✅ Conditions met for volatile market trading | Volatility: ", currentVolatility);
-    return true;
+    return false;
 }
 double GetAverageBuyPrice(int specificMagic = -1)
 {
@@ -18312,7 +18633,6 @@ double GetAverageBuyPrice(int specificMagic = -1)
     double weightedPrice = 0;
     int buyCount = 0;
     
-    // รายการ Magic numbers ของคุณ
     long magicList[] = {
         MAGIC_TEST_SIMPLE, MAGIC_TREND_SCALP,
         MAGIC_SCALP1, MAGIC_SCALP1_HF, MAGIC_SCALP2, MAGIC_SCALP3,
@@ -18322,22 +18642,19 @@ double GetAverageBuyPrice(int specificMagic = -1)
     };
     
     for(int i = 0; i < PositionsTotal(); i++) {
-        if(PositionGetSymbol(i) == _Symbol) {
-            ulong magic;
-            PositionGetInteger(POSITION_MAGIC, magic);
+        string symbol = PositionGetSymbol(i);
+        if(symbol == _Symbol) {
+            ulong magic = PositionGetInteger(POSITION_MAGIC);
             
-            // ตรวจสอบเฉพาะ magic ที่ต้องการ
             bool magicMatch = false;
             if(specificMagic == -1) {
-                // ตรวจสอบทุก magic ในรายการ
                 for(int m = 0; m < ArraySize(magicList); m++) {
-                    if(magic == magicList[m]) {
+                    if(magic == (ulong)magicList[m]) {
                         magicMatch = true;
                         break;
                     }
                 }
             } else {
-                // ตรวจสอบเฉพาะ magic ที่ระบุ
                 magicMatch = (magic == (ulong)specificMagic);
             }
             
@@ -18355,16 +18672,15 @@ double GetAverageBuyPrice(int specificMagic = -1)
     }
     
     if(buyCount == 0) return 0;
-    
     return NormalizeDouble(weightedPrice / totalLots, _Digits);
 }
+
 double GetAverageSellPrice(int specificMagic = -1)
 {
     double totalLots = 0;
     double weightedPrice = 0;
     int sellCount = 0;
     
-    // รายการ Magic numbers
     long magicList[] = {
         MAGIC_TEST_SIMPLE, MAGIC_TREND_SCALP,
         MAGIC_SCALP1, MAGIC_SCALP1_HF, MAGIC_SCALP2, MAGIC_SCALP3,
@@ -18374,14 +18690,14 @@ double GetAverageSellPrice(int specificMagic = -1)
     };
     
     for(int i = 0; i < PositionsTotal(); i++) {
-        if(PositionGetSymbol(i) == _Symbol) {
-            ulong magic;
-            PositionGetInteger(POSITION_MAGIC, magic);
+        string symbol = PositionGetSymbol(i);
+        if(symbol == _Symbol) {
+            ulong magic = PositionGetInteger(POSITION_MAGIC);
             
             bool magicMatch = false;
             if(specificMagic == -1) {
                 for(int m = 0; m < ArraySize(magicList); m++) {
-                    if(magic == magicList[m]) {
+                    if(magic == (ulong)magicList[m]) {
                         magicMatch = true;
                         break;
                     }
@@ -18404,10 +18720,8 @@ double GetAverageSellPrice(int specificMagic = -1)
     }
     
     if(sellCount == 0) return 0;
-    
     return NormalizeDouble(weightedPrice / totalLots, _Digits);
 }
-
 // 🔥 ฟังก์ชันตรวจสอบระยะห่างของออเดอร์
 bool CheckOrderDistance()
 {
@@ -18496,27 +18810,124 @@ bool CheckRiskManagement(double volatility = 0)
 double CalculateCurrentRiskPercent()
 {
     double totalLots = 0;
-    int totalOrders = OrdersTotal();
     
-    for(int i = 0; i < totalOrders; i++) {
-        if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) {
-            if(OrderSymbol() == _Symbol && OrderMagicNumber() == MagicNumber) {
-                totalLots += OrderLots();
+    // รายการ Magic numbers ของคุณ
+    long magicList[] = {
+        MAGIC_TEST_SIMPLE, MAGIC_TREND_SCALP,
+        MAGIC_SCALP1, MAGIC_SCALP1_HF, MAGIC_SCALP2, MAGIC_SCALP3,
+        MAGIC_RECOVERY, MAGIC_INDIVIDUAL, MAGIC_ORPHAN,
+        MAGIC_HEDGE, MAGIC_AI_NEWS, MAGIC_AI_TREND,
+        MAGIC_BREAKOUT, MAGIC_COUNTER, MAGIC_MAIN
+    };
+    
+    for(int i = 0; i < PositionsTotal(); i++) {
+        string symbol = PositionGetSymbol(i);
+        if(symbol == _Symbol) {
+            ulong positionMagic = PositionGetInteger(POSITION_MAGIC);
+            
+            // ตรวจสอบว่า magic อยู่ในรายการของคุณหรือไม่
+            bool magicFound = false;
+            for(int m = 0; m < ArraySize(magicList); m++) {
+                if(positionMagic == (ulong)magicList[m]) {
+                    magicFound = true;
+                    break;
+                }
+            }
+            
+            if(magicFound) {
+                double volume = PositionGetDouble(POSITION_VOLUME);
+                totalLots += volume;
             }
         }
     }
     
     double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    double riskPercent = (totalLots * 1000) / accountBalance * 100; // สูตรตัวอย่าง
+    
+    if(accountBalance <= 0) return 0;
+    
+    // สูตรคำนวณ risk
+    double contractSize = 100000; // Standard lot size for forex
+    double riskPercent = (totalLots * contractSize) / accountBalance * 100;
+    
+    Print("Risk Calculation: Lots=", totalLots, " | Balance=", accountBalance, 
+          " | Risk=", riskPercent, "%");
     
     return NormalizeDouble(riskPercent, 2);
 }
+bool CheckAccountStatus()
+{
+    // ตรวจสอบ margin, balance, ฯลฯ
+    double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+    if(marginLevel < 100) {
+        Print("⚠️ Margin level too low: ", marginLevel);
+        return false;
+    }
+    return true;
+}
+// 🔥 ฟังก์ชัน AnalyzeMarketCondition ที่ถูกต้อง
+ENUM_MARKET_REGIME AnalyzeMarketCondition()
+{
+    double volatility = CalculateVolatility(); // ต้องมีฟังก์ชันนี้
+    double atrValue = iATR(_Symbol, _Period, 14, 0);
+    double priceChange = CalculatePriceChange();
+    
+    // ตรรกะการวิเคราะห์ตลาด
+    if(volatility > 200) {
+        return MARKET_REGIME_HIGH_VOLATILITY;
+    }
+    else if(volatility > 80 && volatility <= 150) {
+        return MARKET_REGIME_RANGING_VOLATILE;
+    }
+    else if(volatility <= 80 && IsRangingMarket()) {
+        return MARKET_REGIME_RANGING_CALM;
+    }
+    else if(IsTrendingMarket()) {
+        return MARKET_REGIME_TRENDING;
+    }
+    else if(IsBreakoutPotential()) {
+        return MARKET_REGIME_BREAKOUT_POTENTIAL;
+    }
+    
+    return MARKET_REGIME_UNKNOWN;
+}
+bool IsTrendingMarket()
+{
+    double maFast = iMA(_Symbol, _Period, 10, 0, MODE_SMA, PRICE_CLOSE, 0);
+    double maSlow = iMA(_Symbol, _Period, 50, 0, MODE_SMA, PRICE_CLOSE, 0);
+    
+    // ตรวจสอบความต่างของ MA
+    double maDiff = MathAbs(maFast - maSlow);
+    double priceDiff = MathAbs(SymbolInfoDouble(_Symbol, SYMBOL_BID) - maSlow);
+    
+    return (maDiff > priceDiff * 0.1);
+}
+// 🔥 ฟังก์ชัน CalculatePriceChange
+double CalculatePriceChange(int period = 20)
+{
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double pastPrice = iClose(_Symbol, _Period, period);
+    
+    if(pastPrice == 0) return 0;
+    
+    double changePercent = ((currentPrice - pastPrice) / pastPrice) * 100;
+    
+    return NormalizeDouble(changePercent, 2);
+}
 
+// 🔥 ฟังก์ชันตรวจสอบ breakout potential
+bool IsBreakoutPotential()
+{
+    double atrValue = iATR(_Symbol, _Period, 14, 0);
+    double currentRange = iHigh(_Symbol, _Period, 0) - iLow(_Symbol, _Period, 0);
+    
+    // ถ้า range แคบกว่าปกติ อาจมี breakout
+    return (currentRange < atrValue * 0.3);
+}
 // 🔥 ตัวอย่างการใช้งานในโค้ดของคุณ:
 void CheckMarketAndTrade()
 {
     // วิเคราะห์สภาพตลาด
-    int marketRegime = AnalyzeMarketCondition();
+    ENUM_MARKET_REGIME marketRegime = AnalyzeMarketCondition();
     
     if(marketRegime == MARKET_REGIME_RANGING_VOLATILE) {
         Print("🌊 DETECTED: VOLATILE RANGING MARKET");
@@ -18533,10 +18944,43 @@ void CheckMarketAndTrade()
                   ShouldTradeInVolatileMarket(MARKET_REGIME_RANGING_VOLATILE));
         }
     }
+    else if(marketRegime == MARKET_REGIME_RANGING_CALM) {
+        Print("🌊 DETECTED: CALM RANGING MARKET");
+        UseRangeStrategy(MARKET_REGIME_RANGING_CALM);
+    }
+    else if(marketRegime == MARKET_REGIME_TRENDING) {
+        Print("📈 DETECTED: TRENDING MARKET");
+        UseTrendStrategy();
+    }
+    else if(marketRegime == MARKET_REGIME_BREAKOUT_POTENTIAL) {
+        Print("⚡ DETECTED: BREAKOUT POTENTIAL");
+        if(IsBreakoutConfirmed(MARKET_REGIME_BREAKOUT_POTENTIAL)) {
+            UseBreakoutStrategy();
+        }
+    }
+    else if(marketRegime == MARKET_REGIME_HIGH_VOLATILITY) {
+        Print("⚠️ DETECTED: HIGH VOLATILITY - PAUSING TRADES");
+    }
+    else {
+        Print("❓ UNKNOWN MARKET REGIME: ", marketRegime);
+    }
 }
-
-
-
+void ExecuteVolatileMarketStrategy()
+{
+    Print("Executing volatile market strategy...");
+    
+    // ตรรกะการเทรดในตลาด volatile
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double atrValue = iATR(_Symbol, _Period, 14, 0);
+    
+    // ตัวอย่าง: เทรดแบบ mean reversion ในตลาด volatile
+    if(IsAtSupport()) {
+        OpenBuyOrderWithRiskManagement();
+    }
+    else if(IsAtResistance()) {
+        OpenSellOrderWithRiskManagement();
+    }
+}
 void CheckForTrade()
 {
     string marketCondition = AnalyzeMarket();
@@ -19159,19 +19603,16 @@ bool IsTradingWithTrend(ENUM_ORDER_TYPE type)
     return false;
 }
 // ฟังก์ชันหาทิศทางเทรนด์
-double GetTrendDirection()
+int GetTrendDirection()
 {
-    double ema50 = GetEMAValue(Symbol(), PERIOD_CURRENT, 50, 0);
-    double ema200 = GetEMAValue(Symbol(), PERIOD_CURRENT, 200, 0);
-    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double uptrendStrength = GetTrendStrength(DIRECTION_UP);
+    double downtrendStrength = GetTrendStrength(DIRECTION_DOWN);
     
-    if(price > ema50 && ema50 > ema200) 
-        return 1.0;    // Uptrend
-    else if(price < ema50 && ema50 < ema200) 
-        return -1.0;   // Downtrend
-    else 
-        return 0.0;    // No clear trend
+    if(uptrendStrength > downtrendStrength) return DIRECTION_UP;
+    else if(downtrendStrength > uptrendStrength) return DIRECTION_DOWN;
+    else return DIRECTION_NEUTRAL;
 }
+
 // ฟังก์ชันตรวจสอบ breakout confirmation
 bool IsConfirmedBreakout(ENUM_ORDER_TYPE orderType = ORDER_TYPE_BUY)
 {
@@ -19218,6 +19659,39 @@ bool IsConfirmedBreakout(ENUM_ORDER_TYPE orderType = ORDER_TYPE_BUY)
     
     return false;
 }
+double GetTrendStrengthNormalized()
+{
+    double uptrendStrength = GetTrendStrength(DIRECTION_UP);
+    double downtrendStrength = GetTrendStrength(DIRECTION_DOWN);
+    
+    // หาค่าสูงสุด
+    double maxStrength = MathMax(uptrendStrength, downtrendStrength);
+    
+    // แปลงเป็นค่า 0-1
+    if(maxStrength == 30.0) return 1.0;    // Strong trend
+    else if(maxStrength == 20.0) return 0.5; // Moderate trend
+    else return 0.0;                        // Weak or no trend
+}
+string GetTrendStatusString()
+{
+    int direction = GetTrendDirection();
+    double strength = 0;
+    
+    if(direction == DIRECTION_UP) {
+        strength = GetTrendStrength(DIRECTION_UP);
+    } else if(direction == DIRECTION_DOWN) {
+        strength = GetTrendStrength(DIRECTION_DOWN);
+    }
+    
+    if(strength == 30.0) {
+        return (direction == DIRECTION_UP ? "STRONG UPTREND" : "STRONG DOWNTREND");
+    } else if(strength == 20.0) {
+        return (direction == DIRECTION_UP ? "MODERATE UPTREND" : "MODERATE DOWNTREND");
+    } else {
+        return "NO CLEAR TREND";
+    }
+}
+
 bool IsMarketGoodForTrading(string symbol, ENUM_MARKET_REGIME regime)
 {
     // ตรวจสอบพื้นฐาน
@@ -19457,25 +19931,85 @@ void OpenSellOrderWithLot(double lotSize)
    }
 }
 // 🔥 สร้างฟังก์ชันนับออร์เดอร์ใหม่
-int CountBuyOrders()
+int CountBuyOrders(int specificMagic = -1)
 {
     int count = 0;
-    for(int i = 0; i < PositionsTotal(); i++)
-    {
-        if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
-            count++;
+    
+    long magicList[] = {
+        MAGIC_TEST_SIMPLE, MAGIC_TREND_SCALP,
+        MAGIC_SCALP1, MAGIC_SCALP1_HF, MAGIC_SCALP2, MAGIC_SCALP3,
+        MAGIC_RECOVERY, MAGIC_INDIVIDUAL, MAGIC_ORPHAN,
+        MAGIC_HEDGE, MAGIC_AI_NEWS, MAGIC_AI_TREND,
+        MAGIC_BREAKOUT, MAGIC_COUNTER, MAGIC_MAIN
+    };
+    
+    for(int i = 0; i < PositionsTotal(); i++) {
+        string symbol = PositionGetSymbol(i);
+        if(symbol == _Symbol) {
+            ulong magic = PositionGetInteger(POSITION_MAGIC);
+            
+            bool magicMatch = false;
+            if(specificMagic == -1) {
+                for(int m = 0; m < ArraySize(magicList); m++) {
+                    if(magic == (ulong)magicList[m]) {
+                        magicMatch = true;
+                        break;
+                    }
+                }
+            } else {
+                magicMatch = (magic == (ulong)specificMagic);
+            }
+            
+            if(magicMatch) {
+                long type = PositionGetInteger(POSITION_TYPE);
+                if(type == POSITION_TYPE_BUY) {
+                    count++;
+                }
+            }
+        }
     }
+    
     return count;
 }
 
-int CountSellOrders()
+int CountSellOrders(int specificMagic = -1)
 {
     int count = 0;
-    for(int i = 0; i < PositionsTotal(); i++)
-    {
-        if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
-            count++;
+    
+    long magicList[] = {
+        MAGIC_TEST_SIMPLE, MAGIC_TREND_SCALP,
+        MAGIC_SCALP1, MAGIC_SCALP1_HF, MAGIC_SCALP2, MAGIC_SCALP3,
+        MAGIC_RECOVERY, MAGIC_INDIVIDUAL, MAGIC_ORPHAN,
+        MAGIC_HEDGE, MAGIC_AI_NEWS, MAGIC_AI_TREND,
+        MAGIC_BREAKOUT, MAGIC_COUNTER, MAGIC_MAIN
+    };
+    
+    for(int i = 0; i < PositionsTotal(); i++) {
+        string symbol = PositionGetSymbol(i);
+        if(symbol == _Symbol) {
+            ulong magic = PositionGetInteger(POSITION_MAGIC);
+            
+            bool magicMatch = false;
+            if(specificMagic == -1) {
+                for(int m = 0; m < ArraySize(magicList); m++) {
+                    if(magic == (ulong)magicList[m]) {
+                        magicMatch = true;
+                        break;
+                    }
+                }
+            } else {
+                magicMatch = (magic == (ulong)specificMagic);
+            }
+            
+            if(magicMatch) {
+                long type = PositionGetInteger(POSITION_TYPE);
+                if(type == POSITION_TYPE_SELL) {
+                    count++;
+                }
+            }
+        }
     }
+    
     return count;
 }
 // 🔥 เพิ่มฟังก์ชันที่ UseRangeStrategy() เรียกใช้
@@ -19501,6 +20035,8 @@ void UseVolatileMarketStrategy()
     // ใช้กลยุทธ์ระมัดระวังในตลาดผันผวน
     // ✅ ใช้ฟังก์ชันเปิดออร์เดอร์ปกติที่มีอยู่
     // ✅ ไม่ต้องลดล็อต แต่เปิดน้อยลงโดยตรวจสอบเงื่อนไขเข้มงวด
+    
+     Print("Using volatile market strategy");
     
     if(CountBuy < (MaxTrade / 2) && IsUptrend() && CalculateTotalProfit() > -20)
     {
