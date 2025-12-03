@@ -306,7 +306,7 @@ int      g_dailyTrades = 0;
 double   g_weeklyProfit = 0.0;
 datetime g_weeklyResetTime = 0;
 
-string   g_currentTrend = "NEUTRAL";
+string   g_currentTrendStr = "NEUTRAL";
 double   g_trendStrength = 0.0;
 double   g_volatility = 0.0;
 double   g_support = 0.0;
@@ -314,6 +314,13 @@ double   g_resistance = 0.0;
 bool     g_isMarketOpen = true;
 datetime g_lastBarTime = 0;     // เวลาแท่งเทียนล่าสุด
 bool g_newBar = false;          // แท่งใหม่เกิดขึ้นหรือไม่
+bool g_enableDebugMode = true;
+double g_maxRiskTrendTrading = 3.0;
+double g_maxRiskRangeTrading = 2.0;
+double g_maxRiskScalpTrading = 1.5;
+double g_EmergencyDrawdownThreshold = 20.0;
+double g_EmergencyMarginLevel = 100.0;
+int g_MaxConsecutiveLosses = 5;
 
 // News variables
 struct NewsEvent {
@@ -446,6 +453,8 @@ enum ENUM_MARKET_REGIME_BASIC
 //
 //ENUM_MARKET_REGIME_DETAILED currentMarketRegime = MARKET_REGIME_RANGING_CALM_DETAILED;
 ENUM_SYSTEM_MODE SystemMode = MODE_NORMAL;
+ENUM_TREND_DIRECTION g_currentTrend = TREND_NONE;
+
 ENUM_MARKET_REGIME_DETAILED g_currentRegime = MARKET_REGIME_RANGING_CALM_DETAILED;
 
 // --- Magic Numbers ---
@@ -690,6 +699,8 @@ int g_Max_Orders = 5;
 bool g_Use_Grid = true;
 bool g_Trend_Only = false;
 bool g_Strict_SL = false;
+double g_rsiValue = 50.0;
+int g_consecutiveLosses = 0; 
 
 // --- Current Strategy Weights ---
 bool currentEnableCounterPosition = EnableCounterPosition;
@@ -927,11 +938,15 @@ void ExecuteSimpleTrendScalp(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_
     ENUM_TREND_DIRECTION mainTrend = AnalyzeMultiTimeframeTrend();
     double trendStrength = CalculateTrendStrength();
     
+    // ✅ แก้ไขตรงนี้: เพิ่มตัวแปร isStrongTrend
+    bool isStrongTrend = (trendStrength > 7.0); // หรือใช้ threshold อื่น
+    
     if(EnableDebugMode)
     {
         Print("1. Main Trend: ", GetTrendDirectionName(mainTrend));
         Print("2. Trend Strength: ", DoubleToString(trendStrength, 2));
         Print("3. Current Positions: ", trendScalpCount, "/", allowedPositions);
+        Print("4. Is Strong Trend: ", isStrongTrend);
     }
 
     // 3. ตรวจสอบเงื่อนไขเทรดตามเทรนด์และ regime
@@ -950,13 +965,18 @@ void ExecuteSimpleTrendScalp(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_
 
         trade.SetExpertMagicNumber(MAGIC_TREND_SCALP);
         
+        // ✅ แก้ไขตรงนี้: ประกาศตัวแปรก่อนใช้
+        double riskMultiplier = isStrongTrend ? 1.0 : 0.7;
+        double tpMultiplier = isStrongTrend ? 3.0 : 2.0;
+        double slMultiplier = isStrongTrend ? 1.0 : 1.5;
+        
         if(mainTrend == TREND_UP)
         {
-            ExecuteTrendBuy(lot, regime);
+            ExecuteTrendBuyWithMultipliers(riskMultiplier, tpMultiplier, slMultiplier);
         }
         else if(mainTrend == TREND_DOWN)
         {
-            ExecuteTrendSell(lot, regime);
+            ExecuteTrendSellWithMultipliers(riskMultiplier, tpMultiplier, slMultiplier);
         }
     }
     else
@@ -964,7 +984,6 @@ void ExecuteSimpleTrendScalp(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_
         DebugPrint(3, "No clear trend signal for " + RegimeToString(regime) + " - waiting");
     }
 }
-
 
 int GetTrendScalpMaxPositionsForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
@@ -1283,7 +1302,7 @@ ENUM_TREND_DIRECTION ConvertToTrendDirection(int direction)
 }
 void ExecuteStrategyByRegime(ENUM_MARKET_REGIME_DETAILED regime, int trendDirection)
 {
-    switch(regime)  // ❌ ผิด: switch(ENUM_MARKET_REGIME_DETAILED regime) → ✅ ถูก: switch(regime)
+    switch(regime)  // ❌ ผิด: switch(regime) → ✅ ถูก: switch(regime)
     {
         case MARKET_REGIME_RANGING_CALM_DETAILED:
             UseRangeStrategy(MARKET_REGIME_RANGING_CALM_DETAILED);
@@ -1332,11 +1351,11 @@ void UseTrendStrategyWithDirection(ENUM_TREND_DIRECTION direction, bool isStrong
     
     if(direction == TREND_UP)
     {
-        ExecuteTrendBuy(riskMultiplier, tpMultiplier, slMultiplier);
+        ExecuteTrendBuyWithMultipliers(riskMultiplier, tpMultiplier, slMultiplier);
     }
     else if(direction == TREND_DOWN)
     {
-        ExecuteTrendSell(riskMultiplier, tpMultiplier, slMultiplier);
+        ExecuteTrendSellWithMultipliers(riskMultiplier, tpMultiplier, slMultiplier);
     }
     
     if(EnableDebugMode)
@@ -1464,65 +1483,33 @@ double GetRequiredTrendStrengthForRegime(ENUM_MARKET_REGIME_DETAILED regime)
     }
 }
 
+
+
 // 🔥 แก้ไขฟังก์ชัน ExecuteTrendBuy และ ExecuteTrendSell
-void ExecuteTrendBuy(double lot, ENUM_MARKET_REGIME_DETAILED regime)
+void ExecuteTrendBuyWithMultipliers(double riskMultiplier, double tpMultiplier, double slMultiplier)
 {
-    // ปรับ TP/SL ตาม regime
-    double tpMultiplier = GetTrendScalpTPMultiplierForRegime(regime);
-    double slMultiplier = GetTrendScalpSLMultiplierForRegime(regime);
+    // คำนวณ lot size
+    double baseLot = 0.01; // หรือใช้ค่าจาก input
+    double lot = baseLot * riskMultiplier;
     
-    double tpPoints = MathMax(Scalp1_TP_Points * tpMultiplier, 10);
-    double slPoints = MathMax(Scalp1_SL_Points * slMultiplier, 15);
+    // ใช้ฟังก์ชัน ExecuteTrendBuy ที่มีอยู่ (รับแค่ lot)
+    ExecuteTrendBuy(lot);
     
-    double tpPrice = GetTPPriceUniversal(true, (int)tpPoints);
-    double slPrice = GetSLPriceUniversal(true, (int)slPoints);
-    
-    DebugPrint(2, "Trend Scalp BUY - Regime: " + EnumToString(regime) + 
-               ", Lot: " + DoubleToString(lot, 2) + 
-               ", TP: " + IntegerToString((int)tpPoints) + "pips");
-               
-    if(trade.Buy(lot, _Symbol, slPrice, 0, tpPrice, "TrendScalp-Buy-" + EnumToString(regime)))
-    {
-        ulong ticket = trade.ResultOrder();
-        Print("✅ TREND SCALP BUY | Regime: " + EnumToString(regime) + 
-              " | Ticket: #" + TicketToStr(ticket) + 
-              " | Lot: " + DoubleToString(lot, 2) + 
-              " | TP: " + IntegerToString((int)tpPoints) + "pips");
-    }
-    else
-    {
-        Print("❌ Trend Scalp BUY Error: " + trade.ResultRetcodeDescription());
-    }
+    Print("Trend Buy with multipliers - Risk: ", riskMultiplier, 
+          ", TP: ", tpMultiplier, ", SL: ", slMultiplier);
 }
 
-void ExecuteTrendSell(double lot, ENUM_MARKET_REGIME_DETAILED regime)
+void ExecuteTrendSellWithMultipliers(double riskMultiplier, double tpMultiplier, double slMultiplier)
 {
-    // ปรับ TP/SL ตาม regime
-    double tpMultiplier = GetTrendScalpTPMultiplierForRegime(regime);
-    double slMultiplier = GetTrendScalpSLMultiplierForRegime(regime);
+    // คำนวณ lot size
+    double baseLot = 0.01; // หรือใช้ค่าจาก input
+    double lot = baseLot * riskMultiplier;
     
-    double tpPoints = MathMax(Scalp1_TP_Points * tpMultiplier, 10);
-    double slPoints = MathMax(Scalp1_SL_Points * slMultiplier, 15);
+    // ใช้ฟังก์ชัน ExecuteTrendSell ที่มีอยู่ (รับแค่ lot)
+    ExecuteTrendSell(lot);
     
-    double tpPrice = GetTPPriceUniversal(false, (int)tpPoints);
-    double slPrice = GetSLPriceUniversal(false, (int)slPoints);
-    
-    DebugPrint(2, "Trend Scalp SELL - Regime: " + EnumToString(regime) + 
-               ", Lot: " + DoubleToString(lot, 2) + 
-               ", TP: " + IntegerToString((int)tpPoints) + "pips");
-               
-    if(trade.Sell(lot, _Symbol, slPrice, 0, tpPrice, "TrendScalp-Sell-" + EnumToString(regime)))
-    {
-        ulong ticket = trade.ResultOrder();
-        Print("✅ TREND SCALP SELL | Regime: " + EnumToString(regime) + 
-              " | Ticket: #" + TicketToStr(ticket) + 
-              " | Lot: " + DoubleToString(lot, 2) + 
-              " | TP: " + IntegerToString((int)tpPoints) + "pips");
-    }
-    else
-    {
-        Print("❌ Trend Scalp SELL Error: " + trade.ResultRetcodeDescription());
-    }
+    Print("Trend Sell with multipliers - Risk: ", riskMultiplier, 
+          ", TP: ", tpMultiplier, ", SL: ", slMultiplier);
 }
 
 double GetTrendScalpTPMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
@@ -5061,6 +5048,104 @@ void UpdateTrendStrength()
     // อัพเดทความแข็งแกร่งของเทรนด์
     currentTrendStrength = GetTrendStrength();
 }
+void AdjustPositionSizeForHighVolatility()
+{
+    if(!EnableDebugMode) return;
+    
+    Print("⚠️ HIGH VOLATILITY DETECTED - Adjusting position sizes");
+    
+    // ลด lot size ลง 50% ในช่วง high volatility
+    double originalLot = 0.01; // หรือดึงจาก input parameter
+    
+    // บันทึกค่าเดิม (ถ้าจำเป็น)
+    static double savedLotSize = originalLot;
+    
+    // ปรับ lot size
+    double adjustedLot = originalLot * 0.5; // ลด 50%
+    
+    // จำกัดค่า minimum lot
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    if(adjustedLot < minLot)
+        adjustedLot = minLot;
+    
+    if(EnableDebugMode)
+    {
+        Print("   Original Lot: ", originalLot);
+        Print("   Adjusted Lot: ", adjustedLot);
+        Print("   Reduction: 50%");
+    }
+    
+    // สามารถเก็บค่า adjusted lot ใน global variable สำหรับใช้ในฟังก์ชันอื่น
+    // g_adjustedLotHighVolatility = adjustedLot;
+}
+// เพิ่มฟังก์ชันนี้ถ้ายังไม่มี
+double GetBaseLotSize()
+{
+    // วิธีที่ 1: ใช้จาก input parameter
+    // input double InpLotSize = 0.01; // ใน input section
+    // return InpLotSize;
+    
+    // วิธีที่ 2: คำนวณตาม balance
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double riskPercent = 1.0; // 1% risk
+    double stopLossPips = 50; // 50 pips SL
+    double pipValue = 10; // สำหรับ forex standard
+    
+    double lot = (balance * riskPercent / 100) / (stopLossPips * pipValue);
+    
+    // จำกัด lot size
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    
+    lot = MathMax(lot, minLot);
+    lot = MathMin(lot, maxLot);
+    
+    return NormalizeDouble(lot, 2);
+}
+// เพิ่มฟังก์ชันนี้
+void UseDefaultStrategy()
+{
+    if(EnableDebugMode)
+        Print("🔄 Using Default Strategy");
+    
+    // Strategy มาตรฐานเมื่อไม่รู้จัก regime หรือไม่ต้องการ strategy เฉพาะ
+    
+    // 1. ตรวจสอบ basic conditions
+    double currentRisk = CalculateCurrentRiskPercent();
+    if(currentRisk > 5.0) // Risk threshold
+    {
+        Print("   ❌ Risk too high for default strategy: ", currentRisk, "%");
+        return;
+    }
+    
+    // 2. ใช้ simple trend following
+    ENUM_TREND_DIRECTION trend = GetCurrentTrendDirection();
+    double trendStrength = CalculateTrendStrength();
+    
+    if(trend == TREND_UP && trendStrength > 4.0)
+    {
+        // Simple buy
+        double lot = GetBaseLotSize() * 0.8; // ใช้ 80% ของ normal lot
+        ExecuteTrendBuy(lot);
+    }
+    else if(trend == TREND_DOWN && trendStrength > 4.0)
+    {
+        // Simple sell
+        double lot = GetBaseLotSize() * 0.8;
+        ExecuteTrendSell(lot);
+    }
+    else
+    {
+        Print("   ⏸️ No clear signal for default strategy");
+    }
+}
+
+// หรือแบบง่ายๆ:
+void UseDefaultStrategySimple()
+{
+    Print("Default Strategy: No specific action");
+    // ไม่ทำอะไร หรือใช้ strategy ที่ conservative
+}
 //----------------ontick New system ---------------//
 void OnTick()
 {
@@ -5119,7 +5204,10 @@ void OnTick()
       Print("--- NEW BAR [" + TimeToString(currentBar) + "] ---");
       
       ProcessNewBarOperations(g_currentRegime);
-      ExecuteRegimeBasedStrategies(g_currentRegime, GetTrendDirection());
+      
+      // ✅ แก้ไขตรงนี้: ต้องแปลงหรือได้ค่า ENUM_TREND_DIRECTION
+      ENUM_TREND_DIRECTION currentTrend = GetCurrentTrendDirection(); // ใช้ฟังก์ชันที่คืนค่า ENUM
+      ExecuteRegimeBasedStrategies(g_currentRegime, currentTrend);
       
       g_lastBarTime = currentBar;
    }
@@ -5420,77 +5508,49 @@ bool IsGoodPullbackForTrend(ENUM_TREND_DIRECTION direction)
 }
 bool ShouldTradeInTrendMarket(ENUM_TREND_DIRECTION trendDirection)
 {
-    // ตรวจสอบว่าเหมาะสำหรับ trend trading หรือไม่
-    ENUM_MARKET_REGIME_DETAILED currentRegime = g_currentRegime;
-    
-    // 1. ตรวจสอบ market regime
-    bool isTrendingMarket = (currentRegime == MARKET_REGIME_TRENDING_STRONG_DETAILED || 
-                            currentRegime == MARKET_REGIME_TRENDING_WEAK_DETAILED);
-    
-    if(!isTrendingMarket)
-    {
-        if(EnableDebugMode)
-            Print("Not a trending market: ", EnumToString(currentRegime));
-        return false;
-    }
-    
-    // 2. ตรวจสอบ trend direction (ต้องไม่เป็น none)
+    // ตรวจสอบ basic conditions
     if(trendDirection == TREND_NONE)
     {
         if(EnableDebugMode)
-            Print("No clear trend direction");
+            Print("ShouldTradeInTrendMarket: No trend direction");
         return false;
     }
     
-    // 3. ตรวจสอบ trend strength
-    double trendStrength = GetTrendStrength(trendDirection);
-    double requiredStrength = GetRequiredTrendStrengthForRegime(currentRegime);
+    // ตรวจสอบ market regime
+    ENUM_MARKET_REGIME_DETAILED regime = g_currentRegime;
+    
+    if(regime != MARKET_REGIME_TRENDING_WEAK_DETAILED && 
+       regime != MARKET_REGIME_TRENDING_STRONG_DETAILED)
+    {
+        if(EnableDebugMode)
+            Print("ShouldTradeInTrendMarket: Not in trending regime - ", EnumToString(regime));
+        return false;
+    }
+    
+    // ตรวจสอบ trend strength
+    double trendStrength = CalculateTrendStrength();
+    double requiredStrength = (regime == MARKET_REGIME_TRENDING_STRONG_DETAILED) ? 5.0 : 7.0;
     
     if(trendStrength < requiredStrength)
     {
         if(EnableDebugMode)
-            Print("Trend strength too low: ", trendStrength, " < ", requiredStrength);
+            Print("ShouldTradeInTrendMarket: Trend strength too low - ", trendStrength, " < ", requiredStrength);
         return false;
     }
     
-    // 4. ตรวจสอบ volatility
-    double volatility = CalculateVolatility();
-    if(volatility > 200) // Volatility สูงเกินไป
-    {
-        if(EnableDebugMode)
-            Print("Volatility too high for trend trading: ", volatility);
-        return false;
-    }
-    
-    // 5. ตรวจสอบ pullback (สำหรับ trend continuation)
-    if(!IsGoodPullbackForTrend(trendDirection))
-    {
-        if(EnableDebugMode)
-            Print("Not a good pullback for trend continuation");
-        return false;
-    }
-    
-    // 6. ตรวจสอบว่าไม่ใช่ช่วงข่าว
-    if(IsNewsEventTime())
-    {
-        if(EnableDebugMode)
-            Print("News event time - avoid trend trading");
-        return false;
-    }
-    
-    // 7. ตรวจสอบ risk level
+    // ตรวจสอบ risk
     double currentRisk = CalculateCurrentRiskPercent();
-    if(currentRisk > MaxRiskForTrendTrading)
+    if(currentRisk > g_maxRiskTrendTrading)
     {
         if(EnableDebugMode)
-            Print("Risk too high for trend trading: ", currentRisk, "%");
+            Print("ShouldTradeInTrendMarket: Risk too high - ", currentRisk, "% > ", g_maxRiskTrendTrading, "%");
         return false;
     }
     
     return true;
 }
 // 🔥 ฟังก์ชัน ExecuteRegimeBasedStrategies
-void ExecuteRegimeBasedStrategies(ENUM_MARKET_REGIME_DETAILED regime, int trendDirection)
+void ExecuteRegimeBasedStrategies(ENUM_MARKET_REGIME_DETAILED regime, ENUM_TREND_DIRECTION trendDirection)  // ✅ เปลี่ยนจาก int เป็น ENUM_TREND_DIRECTION
 {
    switch(regime)
    {
@@ -5502,42 +5562,34 @@ void ExecuteRegimeBasedStrategies(ENUM_MARKET_REGIME_DETAILED regime, int trendD
          
       case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
          // ตรวจสอบ volatility ก่อนเทรด
-         if(currentVolatility < 150 && ShouldTradeInVolatileMarket(MARKET_REGIME_RANGING_VOLATILE_DETAILED)) {
-            ExecuteVolatileMarketStrategy();
+          if(currentVolatility < 150 && ShouldTradeInVolatileMarket(MARKET_REGIME_RANGING_VOLATILE_DETAILED)) {
+        ExecuteVolatileMarketStrategy();
          }
          break;
          
-         case MARKET_REGIME_TRENDING_WEAK_DETAILED:
-        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
-            if(ShouldTradeInTrendMarket(trendDirection)) {
-                bool isStrong = (regime == MARKET_REGIME_TRENDING_STRONG_DETAILED);
-                UseTrendStrategyWithDirection(trendDirection, isStrong);
-            }
-            break;
+      case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+      case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+         if(ShouldTradeInTrendMarket(trendDirection)) {
+            bool isStrong = (regime == MARKET_REGIME_TRENDING_STRONG_DETAILED);
+            UseTrendStrategyWithDirection(trendDirection, isStrong);
+         }
+         break;
             
-        case MARKET_REGIME_RANGING_CALM_DETAILED:
-        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
-            if(ShouldTradeInRangeMarket()) {
-                UseRangeStrategy();
-            }
-            break;
-            
-        case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
-            if(ShouldTradeInBreakoutMarket()) {
-                UseBreakoutStrategy();
-            }
-            break;
-         
       case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
+          // ✅ เรียกใช้ถูกต้องแล้ว (ส่ง enum)
          if(IsBreakoutConfirmed(MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED)) {
-            UseBreakoutStrategy();
+        UseBreakoutStrategy();
          }
-         break;
+          break;
          
       case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
          // ปรับ position size ให้เล็กลงหรือหยุดเทรด
          AdjustPositionSizeForHighVolatility();
          Print("⚠️ HIGH VOLATILITY - Reduced position sizes");
+         break;
+         
+      case MARKET_REGIME_NEWS_EVENT_DETAILED:
+         Print("📰 NEWS EVENT - Trading paused");
          break;
          
       case MARKET_REGIME_UNKNOWN_DETAILED:
@@ -5556,7 +5608,8 @@ void ManageOpenPositionsByRegime(ENUM_MARKET_REGIME_DETAILED regime)
          AdjustStopLossForVolatility();
          break;
          
-      case MARKET_REGIME_TRENDING:
+      case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+      case MARKET_REGIME_TRENDING_STRONG_DETAILED:
          // ใน trending market อาจใช้ trailing stop
          ApplyTrailingStopForTrend();
          break;
@@ -5565,10 +5618,322 @@ void ManageOpenPositionsByRegime(ENUM_MARKET_REGIME_DETAILED regime)
          // ใน ranging market ใช้ tight stop
          ApplyTightStopLoss();
          break;
+         
+      case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+         // ใน ranging volatile ใช้ volatility adjustment
+         AdjustStopLossForVolatility();
+         ApplyTightStopLoss(); // หรือไม่ใช้ตามต้องการ
+         break;
+         
+      case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
+         // ใน breakout market ใช้ trailing stop ที่ aggressive
+         ApplyTrailingStopForStrongTrend();
+         break;
+         
+      case MARKET_REGIME_NEWS_EVENT_DETAILED:
+         // ในช่วงข่าว ใช้ tight stop เพื่อป้องกันความเสี่ยง
+         ApplyTightStopLossForCondition(true);
+         break;
+         
+      default:
+         // สำหรับ regime อื่นๆ ใช้การจัดการปกติ
+         if(EnableDebugMode)
+            Print("No specific position management for regime: ", EnumToString(regime));
+         break;
    }
 }
+// ========== VOLATILITY ADJUSTMENT FUNCTIONS ==========
 
+void AdjustStopLossForVolatility()
+{
+    // ปรับ Stop Loss ตาม volatility ปัจจุบัน
+    double volatility = CalculateVolatility();
+    double atrValue = GetATRValue(_Symbol, _Period, 14, 0);
 
+    
+    if(EnableDebugMode)
+        Print("🔧 Adjusting Stop Loss for Volatility: ", volatility, "%, ATR: ", atrValue);
+    
+    // ปรับ SL ตาม volatility
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol)
+        {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            
+            // คำนวณ SL ใหม่ตาม volatility
+            double newSL = 0;
+            double slDistance = 0;
+            
+            if(volatility > 200) // High volatility
+            {
+                slDistance = atrValue * 3.0; // Wider SL
+            }
+            else if(volatility > 100) // Medium volatility
+            {
+                slDistance = atrValue * 2.0; // Normal SL
+            }
+            else // Low volatility
+            {
+                slDistance = atrValue * 1.5; // Tighter SL
+            }
+            
+            if(type == POSITION_TYPE_BUY)
+            {
+                newSL = openPrice - slDistance;
+                // ตรวจสอบว่าไม่ทำให้ SL ใกล้กว่่าที่ควร
+                if(newSL < currentPrice - (atrValue * 0.5))
+                    newSL = currentPrice - (atrValue * 0.5);
+            }
+            else if(type == POSITION_TYPE_SELL)
+            {
+                newSL = openPrice + slDistance;
+                // ตรวจสอบว่าไม่ทำให้ SL ใกล้กว่่าที่ควร
+                if(newSL > currentPrice + (atrValue * 0.5))
+                    newSL = currentPrice + (atrValue * 0.5);
+            }
+            
+            // ปรับ SL ถ้าจำเป็น
+            if(newSL > 0 && MathAbs(newSL - currentSL) > SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10)
+            {
+                trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                if(EnableDebugMode)
+                    Print("   Adjusted SL for ticket #", ticket, 
+                          " from ", currentSL, " to ", newSL,
+                          " (Volatility: ", volatility, "%)");
+            }
+        }
+    }
+}
+// เพิ่มฟังก์ชันนี้ถ้ายังไม่มี (ง่ายกว่า GetATRValue)
+double GetCurrentATR(int period = 14)
+{
+    int atrHandle = iATR(_Symbol, _Period, period);
+    double atrArray[1];
+    
+    if(atrHandle == INVALID_HANDLE) 
+    {
+        Print("Error creating ATR indicator");
+        return 0.0;
+    }
+    
+    if(CopyBuffer(atrHandle, 0, 0, 1, atrArray) <= 0)
+    {
+        Print("Error copying ATR buffer");
+        IndicatorRelease(atrHandle);
+        return 0.0;
+    }
+    
+    IndicatorRelease(atrHandle);
+    return atrArray[0];
+}
+// เวอร์ชันง่ายๆ สำหรับใช้ทันที
+void AdjustStopLossForVolatilitySimple()
+{
+    double atrValue = GetATRValue(_Symbol, _Period, 14, 0);
+
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol)
+        {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            
+            double newSL = 0;
+            if(type == POSITION_TYPE_BUY)
+                newSL = openPrice - (atrValue * 2.0);
+            else if(type == POSITION_TYPE_SELL)
+                newSL = openPrice + (atrValue * 2.0);
+            
+            if(newSL > 0)
+                trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+        }
+    }
+}
+// ========== TRAILING STOP FUNCTIONS ==========
+
+void ApplyTrailingStopForTrend()
+{
+    // Apply trailing stop สำหรับเทรนด์
+    ENUM_TREND_DIRECTION currentTrend = GetCurrentTrendDirection();
+    double atrValue = GetCurrentATR(14);
+    
+    if(EnableDebugMode)
+        Print("🎯 Applying Trailing Stop for Trend: ", TrendToString(currentTrend));
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol)
+        {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            
+            // ตรวจสอบว่าออเดอร์นี้สอดคล้องกับเทรนด์หรือไม่
+            bool isInTrendDirection = false;
+            if(currentTrend == TREND_UP && type == POSITION_TYPE_BUY)
+                isInTrendDirection = true;
+            else if(currentTrend == TREND_DOWN && type == POSITION_TYPE_SELL)
+                isInTrendDirection = true;
+            
+            if(isInTrendDirection)
+            {
+                // Trailing stop สำหรับเทรนด์
+                double newSL = 0;
+                double trailingDistance = atrValue * 1.5; // 1.5 x ATR
+                
+                if(type == POSITION_TYPE_BUY)
+                {
+                    newSL = currentPrice - trailingDistance;
+                    // ตรวจสอบว่า SL ใหม่ต้องดีกว่าเดิม
+                    if(newSL > currentSL && newSL > openPrice)
+                    {
+                        trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                        if(EnableDebugMode)
+                            Print("   Trailing BUY #", ticket, " SL: ", currentSL, " → ", newSL);
+                    }
+                }
+                else if(type == POSITION_TYPE_SELL)
+                {
+                    newSL = currentPrice + trailingDistance;
+                    // ตรวจสอบว่า SL ใหม่ต้องดีกว่าเดิม
+                    if(newSL < currentSL && newSL < openPrice)
+                    {
+                        trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                        if(EnableDebugMode)
+                            Print("   Trailing SELL #", ticket, " SL: ", currentSL, " → ", newSL);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// เวอร์ชันสำหรับเทรนด์แรง
+void ApplyTrailingStopForStrongTrend()
+{
+    ENUM_MARKET_REGIME_DETAILED regime = g_currentRegime;
+    
+    if(regime == MARKET_REGIME_TRENDING_STRONG_DETAILED)
+    {
+        double atrValue = GetCurrentATR(14);
+        
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            if(PositionGetSymbol(i) == _Symbol)
+            {
+                ulong ticket = PositionGetInteger(POSITION_TICKET);
+                ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+                double profit = PositionGetDouble(POSITION_PROFIT);
+                
+                // ใช้ trailing stop ที่ aggressive กว่าในเทรนด์แรง
+                if(profit > 0) // มีกำไรแล้ว
+                {
+                    double newSL = 0;
+                    if(type == POSITION_TYPE_BUY)
+                        newSL = currentPrice - (atrValue * 1.0); // แคบกว่า
+                    else if(type == POSITION_TYPE_SELL)
+                        newSL = currentPrice + (atrValue * 1.0);
+                    
+                    trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                }
+            }
+        }
+    }
+}
+// ========== TIGHT STOP LOSS FUNCTIONS ==========
+
+void ApplyTightStopLoss()
+{
+    // ใช้ tight stop loss สำหรับตลาดผันผวนหรือต้องการป้องกันความเสี่ยง
+    double atrValue = GetCurrentATR(14);
+    
+    if(EnableDebugMode)
+        Print("🔒 Applying Tight Stop Loss (ATR: ", atrValue, ")");
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol)
+        {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            
+            // คำนวณ tight stop loss
+            double newSL = 0;
+            double tightDistance = atrValue * 0.8; // 0.8 x ATR (แคบมาก)
+            
+            // ตรวจสอบว่า position ยังไม่กำไรมาก
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            double profitPips = MathAbs(currentPrice - openPrice) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+            
+            if(profitPips < 20) // ยังไม่ได้กำไรมาก
+            {
+                if(type == POSITION_TYPE_BUY)
+                {
+                    newSL = openPrice - tightDistance;
+                    // ตรวจสอบว่าไม่ทำให้ SL เกิน current price
+                    if(newSL < currentPrice - (atrValue * 0.3))
+                        newSL = currentPrice - (atrValue * 0.3);
+                }
+                else if(type == POSITION_TYPE_SELL)
+                {
+                    newSL = openPrice + tightDistance;
+                    // ตรวจสอบว่าไม่ทำให้ SL เกิน current price
+                    if(newSL > currentPrice + (atrValue * 0.3))
+                        newSL = currentPrice + (atrValue * 0.3);
+                }
+                
+                // ปรับ SL ถ้าจำเป็น
+                if(newSL > 0)
+                {
+                    trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                    if(EnableDebugMode)
+                        Print("   Tight SL for #", ticket, ": ", currentSL, " → ", newSL);
+                }
+            }
+        }
+    }
+}
+
+// เวอร์ชันสำหรับ specific conditions
+void ApplyTightStopLossForCondition(bool condition)
+{
+    if(condition) // เช่น ตลาดผันผวนสูง, ข่าวสำคัญ, etc.
+    {
+        double atrValue = GetCurrentATR(14);
+        
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            if(PositionGetSymbol(i) == _Symbol)
+            {
+                ulong ticket = PositionGetInteger(POSITION_TICKET);
+                ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                
+                double newSL = 0;
+                if(type == POSITION_TYPE_BUY)
+                    newSL = openPrice - (atrValue * 0.5); // แคบมาก
+                else if(type == POSITION_TYPE_SELL)
+                    newSL = openPrice + (atrValue * 0.5);
+                
+                trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+            }
+        }
+    }
+}
 // 🔥 ฟังก์ชัน DisplayMarketDashboard
 void DisplayMarketDashboard(ENUM_MARKET_REGIME_DETAILED regime, int trendDirection)
 {
@@ -5639,7 +6004,7 @@ double CalculateCurrentVolatility()
    
    if(currentPrice == 0) return 0;
    
-   double volatilityPercent = (atrValue / currentPrice) * 10000;
+   double volatilityPercent = (atrHandle / currentPrice) * 10000;
    
    return NormalizeDouble(volatilityPercent, 2);
 }
@@ -5808,17 +6173,17 @@ void ManageEmergencyPositions()
 //+------------------------------------------------------------------+
 //| Try Emergency Counter                                           |
 //+------------------------------------------------------------------+
-void TryEmergencyCounter(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_UNKNOWN)
+void TryEmergencyCounter(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_UNKNOWN_DETAILED)  // ✅ แก้ไข enum value
 {
    // ตรวจจับ regime ถ้าไม่ได้ส่งมา
-   if(regime == MARKET_REGIME_NORMAL)
+   if(regime == MARKET_REGIME_UNKNOWN_DETAILED)  // ✅ แก้ไขจาก MARKET_REGIME_NORMAL
    {
       regime = DetectMarketRegime();
    }
    
    ulong worstTicket = 0;
    double worstProfit = 0;
-   ENUM_POSITION_TYPE worstType = (ENUM_POSITION_TYPE)WRONG_VALUE_CONST;
+   ENUM_POSITION_TYPE worstType = WRONG_VALUE;
    double worstVolume = 0;
    string worstSymbol = "";
    
@@ -5851,7 +6216,8 @@ void TryEmergencyCounter(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_UNKN
    if(worstProfit <= -emergencyTrigger)
    {
       // 🔥 ปรับ counter multiplier ตาม regime
-      double counterMultiplier = GetEmergencyCounterMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime);
+      // ✅ แก้ไข syntax error: ลบ ENUM_MARKET_REGIME_DETAILED ออก
+      double counterMultiplier = GetEmergencyCounterMultiplierForRegime(regime);
       double counterLot = worstVolume * localCounterMultiplier * counterMultiplier;
       
       if(battlePhase >= 2) counterLot *= localAggressiveMult;
@@ -5887,31 +6253,86 @@ double GetEmergencyCounterMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime
             return 1.0;
     }
 }
+double CalculateCurrentDrawdownPercent()
+{
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    
+    if(balance <= 0) return 0;
+    
+    double drawdownPercent = ((balance - equity) / balance) * 100;
+    return NormalizeDouble(drawdownPercent, 2);
+}
+int GetConsecutiveLossCount()
+{
+    static int lastLossCount = 0;
+    static datetime lastCheckTime = 0;
+    
+    // รีเฟรชทุก 1 นาที
+    if(TimeCurrent() - lastCheckTime < 60)
+        return lastLossCount;
+    
+    lastCheckTime = TimeCurrent();
+    
+    
+    
+    // ✅ วิธีที่ 1: ใช้ HistoryDealsTotal() (แนะนำ)
+    int totalDeals = HistoryDealsTotal();
+    
+    // ตรวจสอบจากประวัติ (ล่าสุดไปหาเก่าสุด)
+    for(int i = totalDeals - 1; i >= 0; i--)
+    {
+        ulong dealTicket = HistoryDealGetTicket(i);
+        if(dealTicket > 0)
+        {
+            ENUM_DEAL_ENTRY entryType = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+            
+            // ตรวจสอบเฉพาะ position close deals
+            if(entryType == DEAL_ENTRY_OUT || entryType == DEAL_ENTRY_OUT_BY)
+            {
+                double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+                
+                if(profit < 0) // ขาดทุน
+                {
+                    consecutiveLosses++;
+                }
+                else // กำไร - หยุดนับ
+                {
+                    break;
+                }
+            }
+        }
+    }
+    
+    lastLossCount = consecutiveLosses;
+    return consecutiveLosses;
+}
 // ฟังก์ชันตรวจสอบเงื่อนไขฉุกเฉิน
 bool IsEmergencyCondition()
 {
     // ตรวจสอบ drawdown
     double drawdownPercent = CalculateCurrentDrawdownPercent();
-    if(drawdownPercent > EmergencyDrawdownThreshold) {
+    if(drawdownPercent > g_EmergencyDrawdownThreshold) {
         Print("⚠️ Emergency: Drawdown exceeded: ", drawdownPercent, "%");
         return true;
     }
     
     // ตรวจสอบ margin level
     double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
-    if(marginLevel < EmergencyMarginLevel) {
+    if(marginLevel < g_EmergencyMarginLevel) {
         Print("⚠️ Emergency: Margin level low: ", marginLevel, "%");
         return true;
     }
     
     // ตรวจสอบจำนวน loss positions ติดต่อกัน
-    int consecutiveLosses = GetConsecutiveLossCount();
-    if(consecutiveLosses > MaxConsecutiveLosses) {
-        Print("⚠️ Emergency: Too many consecutive losses: ", consecutiveLosses);
-        return true;
-    }
+    g_consecutiveLosses = GetConsecutiveLossCount();
+    if(g_consecutiveLosses > MaxConsecutiveLosses) {
+    Print("⚠️ Emergency: Too many consecutive losses: ", g_consecutiveLosses);
+
     
-    return false;
+   }
+   
+   return false;
 }
 // ฟังก์ชัน ExecuteEmergencyCounterStrategy
 void ExecuteEmergencyCounterStrategy(ENUM_MARKET_REGIME_DETAILED regime)
@@ -5921,7 +6342,7 @@ void ExecuteEmergencyCounterStrategy(ENUM_MARKET_REGIME_DETAILED regime)
     Print("   Time: ", TimeToString(TimeCurrent()));
     
     // 1. ปิดบาง positions ที่ขาดทุนมากที่สุด
-    CloseWorstPerformingPositions();
+    //CloseWorstPerformingPositions();
     
     // 2. ปรับ lot size ตาม regime
     double emergencyLot = CalculateEmergencyLotSize(regime);
@@ -5952,7 +6373,378 @@ void ExecuteEmergencyCounterStrategy(ENUM_MARKET_REGIME_DETAILED regime)
     // 5. ตั้งค่า take profit ที่เร็วขึ้น
     ApplyQuickTakeProfitForEmergency();
 }
-
+void ApplyWiderStopLossForEmergency()
+{
+    int totalPositions = PositionsTotal();
+    if(totalPositions == 0)
+    {
+        Print("⚠️ No positions to adjust stop loss");
+        return;
+    }
+    
+    Print("🔧 Applying WIDER Stop Loss for Emergency");
+    Print("   Positions to adjust: ", totalPositions);
+    
+    double atrValue = GetCurrentATR(14);
+    int adjustedCount = 0;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentTP = PositionGetDouble(POSITION_TP);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            
+            // คำนวณ new SL ที่กว้างขึ้น (3-5x ATR แทนที่จะเป็น 1-2x ปกติ)
+            double newSL = 0;
+            double widerMultiplier = 4.0; // 4 เท่าของ ATR (กว้างกว่าเดิม)
+            
+            if(type == POSITION_TYPE_BUY)
+            {
+                newSL = openPrice - (atrValue * widerMultiplier);
+                
+                // ตรวจสอบว่า newSL ไม่ต่ำกว่า currentPrice มากเกินไป
+                double maxDistance = atrValue * 6.0;
+                if(currentPrice - newSL > maxDistance)
+                {
+                    newSL = currentPrice - maxDistance;
+                }
+            }
+            else if(type == POSITION_TYPE_SELL)
+            {
+                newSL = openPrice + (atrValue * widerMultiplier);
+                
+                // ตรวจสอบว่า newSL ไม่สูงกว่า currentPrice มากเกินไป
+                double maxDistance = atrValue * 6.0;
+                if(newSL - currentPrice > maxDistance)
+                {
+                    newSL = currentPrice + maxDistance;
+                }
+            }
+            
+            // ปรับ SL ถ้าจำเป็น
+            if(newSL > 0 && newSL != currentSL)
+            {
+                if(trade.PositionModify(ticket, newSL, currentTP))
+                {
+                    adjustedCount++;
+                    Print("   ✅ Adjusted #", ticket, 
+                          " SL: ", currentSL, " → ", newSL,
+                          " (ATR Multiplier: ", widerMultiplier, ")");
+                }
+                else
+                {
+                    Print("   ❌ Failed to adjust #", ticket, 
+                          " Error: ", trade.ResultRetcodeDescription());
+                }
+            }
+        }
+    }
+    
+    Print("📊 Total positions adjusted: ", adjustedCount, "/", totalPositions);
+}
+void ApplyQuickTakeProfitForEmergency()
+{
+    int totalPositions = PositionsTotal();
+    if(totalPositions == 0)
+    {
+        Print("⚠️ No positions to adjust take profit");
+        return;
+    }
+    
+    Print("🎯 Applying QUICK Take Profit for Emergency");
+    Print("   Positions to adjust: ", totalPositions);
+    
+    double atrValue = GetCurrentATR(14);
+    int adjustedCount = 0;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentTP = PositionGetDouble(POSITION_TP);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            
+            // คำนวณ new TP ที่ใกล้ขึ้น (1-2x ATR แทนที่จะเป็น 3-4x ปกติ)
+            double newTP = 0;
+            double quickMultiplier = 1.5; // 1.5 เท่าของ ATR (ใกล้กว่าเดิม)
+            
+            // ตรวจสอบว่าต้องการ take profit หรือไม่
+            bool shouldAdjustTP = true;
+            
+            // ถ้า position กำลังขาดทุนหนัก อาจไม่ปรับ TP
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            if(profit < -50) // ขาดทุนมากกว่า $50
+            {
+                Print("   ⏸️ Skipping #", ticket, " - Heavy loss: $", profit);
+                shouldAdjustTP = false;
+            }
+            
+            if(shouldAdjustTP)
+            {
+                if(type == POSITION_TYPE_BUY)
+                {
+                    newTP = openPrice + (atrValue * quickMultiplier);
+                    
+                    // ตรวจสอบว่า newTP ไม่สูงเกินไป
+                    double minProfitDistance = atrValue * 0.5;
+                    if(newTP - currentPrice < minProfitDistance)
+                    {
+                        newTP = currentPrice + minProfitDistance;
+                    }
+                }
+                else if(type == POSITION_TYPE_SELL)
+                {
+                    newTP = openPrice - (atrValue * quickMultiplier);
+                    
+                    // ตรวจสอบว่า newTP ไม่ต่ำเกินไป
+                    double minProfitDistance = atrValue * 0.5;
+                    if(currentPrice - newTP < minProfitDistance)
+                    {
+                        newTP = currentPrice - minProfitDistance;
+                    }
+                }
+                
+                // ปรับ TP ถ้าจำเป็น
+                if(newTP > 0 && newTP != currentTP)
+                {
+                    if(trade.PositionModify(ticket, currentSL, newTP))
+                    {
+                        adjustedCount++;
+                        Print("   ✅ Adjusted #", ticket, 
+                              " TP: ", currentTP, " → ", newTP,
+                              " (ATR Multiplier: ", quickMultiplier, ")");
+                    }
+                    else
+                    {
+                        Print("   ❌ Failed to adjust #", ticket, 
+                              " Error: ", trade.ResultRetcodeDescription());
+                    }
+                }
+            }
+        }
+    }
+    
+    Print("📊 Total TP adjusted: ", adjustedCount, "/", totalPositions);
+}
+void ApplySmartEmergencyStopLossTakeProfit(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("🧠 Applying SMART Emergency SL/TP for Regime: ", RegimeToString(regime));
+    
+    double atrValue = GetCurrentATR(14);
+    
+    // ตั้งค่า multipliers ตาม regime
+    double slMultiplier = 3.0; // Default
+    double tpMultiplier = 2.0; // Default
+    
+    switch(regime)
+    {
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+            slMultiplier = 5.0; // กว้างมาก
+            tpMultiplier = 3.0; // อยู่ห่างพอสมควร
+            break;
+            
+        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+            slMultiplier = 4.0; // กว้าง
+            tpMultiplier = 4.0; // ไกล (ให้กำไรเดินต่อ)
+            break;
+            
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            slMultiplier = 3.0; // ปกติ
+            tpMultiplier = 1.5; // ใกล้
+            break;
+            
+        case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
+            slMultiplier = 3.5; // กว้างปานกลาง
+            tpMultiplier = 3.0; // ไกลปานกลาง
+            break;
+            
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            slMultiplier = 6.0; // กว้างมาก
+            tpMultiplier = 2.0; // ใกล้
+            break;
+    }
+    
+    Print("   SL Multiplier: ", slMultiplier, "x ATR");
+    Print("   TP Multiplier: ", tpMultiplier, "x ATR");
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            
+            double newSL = 0;
+            double newTP = 0;
+            
+            if(type == POSITION_TYPE_BUY)
+            {
+                newSL = openPrice - (atrValue * slMultiplier);
+                newTP = openPrice + (atrValue * tpMultiplier);
+            }
+            else if(type == POSITION_TYPE_SELL)
+            {
+                newSL = openPrice + (atrValue * slMultiplier);
+                newTP = openPrice - (atrValue * tpMultiplier);
+            }
+            
+            trade.PositionModify(ticket, newSL, newTP);
+            
+            if(EnableDebugMode)
+            {
+                Print("   Smart adjust #", ticket, 
+                      " SL: ", newSL, " TP: ", newTP);
+            }
+        }
+    }
+}
+void ApplyDynamicEmergencyStopLossTakeProfit()
+{
+    Print("📈 Applying DYNAMIC Emergency SL/TP based on P/L");
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            
+            double atrValue = GetCurrentATR(14);
+            
+            // Dynamic multipliers based on profit/loss
+            double slMultiplier, tpMultiplier;
+            
+            if(profit < -100) // ขาดทุนหนัก (> $100)
+            {
+                slMultiplier = 5.0; // กว้างมาก (ให้มีโอกาสคืนทุน)
+                tpMultiplier = 2.5; // ใกล้ (ต้องการกำไรเร็ว)
+            }
+            else if(profit < 0) // ขาดทุนเล็กน้อย
+            {
+                slMultiplier = 3.5; // กว้าง
+                tpMultiplier = 2.0; // ใกล้
+            }
+            else if(profit > 50) // กำไร (> $50)
+            {
+                slMultiplier = 2.0; // แคบ (ป้องกันกำไร)
+                tpMultiplier = 1.5; // ใกล้ (เก็บกำไร)
+            }
+            else // กำไรเล็กน้อยหรือ break-even
+            {
+                slMultiplier = 3.0; // ปกติ
+                tpMultiplier = 2.0; // ปกติ
+            }
+            
+            double newSL = 0;
+            double newTP = 0;
+            
+            if(type == POSITION_TYPE_BUY)
+            {
+                newSL = currentPrice - (atrValue * slMultiplier);
+                newTP = currentPrice + (atrValue * tpMultiplier);
+            }
+            else if(type == POSITION_TYPE_SELL)
+            {
+                newSL = currentPrice + (atrValue * slMultiplier);
+                newTP = currentPrice - (atrValue * tpMultiplier);
+            }
+            
+            // Move SL to break-even if in good profit
+            if(profit > 20)
+            {
+                if(type == POSITION_TYPE_BUY)
+                    newSL = MathMax(newSL, openPrice);
+                else if(type == POSITION_TYPE_SELL)
+                    newSL = MathMin(newSL, openPrice);
+            }
+            
+            trade.PositionModify(ticket, newSL, newTP);
+            
+            Print("   Dynamic #", ticket, 
+                  " P/L: $", profit,
+                  " SL: ", newSL, " (", slMultiplier, "x ATR)",
+                  " TP: ", newTP, " (", tpMultiplier, "x ATR)");
+        }
+    }
+}
+double GetBaseEmergencyLot()
+{
+    Print("🔧 Calculating Base Emergency Lot");
+    
+    // วิธีที่ 1: ใช้ percentage ของ balance
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    
+    // คำนวณ drawdown percentage
+    double drawdownPercent = 0;
+    if(balance > 0)
+    {
+        drawdownPercent = ((balance - equity) / balance) * 100;
+    }
+    
+    // วิธีที่ 2: ใช้ fixed risk amount
+    double emergencyRiskAmount = 50.0; // $50 risk สำหรับ emergency trade
+    double stopLossPips = 50; // 50 pips สำหรับ emergency SL
+    double pipValue = 10; // สำหรับ forex standard (ประมาณ)
+    
+    // คำนวณ base lot
+    double baseLot = emergencyRiskAmount / (stopLossPips * pipValue);
+    
+    // วิธีที่ 3: ปรับตาม drawdown
+    double drawdownMultiplier = 1.0;
+    if(drawdownPercent > 20)
+        drawdownMultiplier = 0.3; // ลด lot มากถ้า drawdown สูง
+    else if(drawdownPercent > 10)
+        drawdownMultiplier = 0.5; // ลด lot ปานกลาง
+    else if(drawdownPercent > 5)
+        drawdownMultiplier = 0.7; // ลด lot น้อย
+    
+    baseLot *= drawdownMultiplier;
+    
+    // วิธีที่ 4: ใช้จาก input parameter ถ้ามี
+    #ifdef InpEmergencyLotSize
+        baseLot = InpEmergencyLotSize;
+    #endif
+    
+    // จำกัด lot size
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    
+    baseLot = MathMax(baseLot, minLot);
+    baseLot = MathMin(baseLot, maxLot);
+    
+    // Normalize to step size
+    if(stepLot > 0)
+    {
+        baseLot = MathRound(baseLot / stepLot) * stepLot;
+    }
+    
+    baseLot = NormalizeDouble(baseLot, 2);
+    
+    Print("   Balance: $", balance);
+    Print("   Equity: $", equity);
+    Print("   Drawdown: ", drawdownPercent, "%");
+    Print("   Drawdown Multiplier: ", drawdownMultiplier);
+    Print("   Min Lot: ", minLot);
+    Print("   Max Lot: ", maxLot);
+    Print("   Final Emergency Lot: ", baseLot);
+    
+    return baseLot;
+}
 double CalculateEmergencyLotSize(ENUM_MARKET_REGIME_DETAILED regime)
 {
     double baseLot = GetBaseEmergencyLot();
@@ -6201,14 +6993,14 @@ void ManageCounterPositions(ENUM_MARKET_REGIME_DETAILED regime)
    if(worstTicket == 0) return;
    
    // ปรับ counter trigger ตาม regime
-   double adjustedCounterTrigger = GetCounterTriggerForRegime(ENUM_MARKET_REGIME_DETAILED regime);
+   double adjustedCounterTrigger = GetCounterTriggerForRegime(regime);
    
    if(worstProfit > -adjustedCounterTrigger) return;
    
    if(HasCounterPositionFor(worstTicket)) return;
    
    // ปรับ max counter positions ตาม regime
-   int adjustedMaxCounter = GetMaxCounterPositionsForRegime(ENUM_MARKET_REGIME_DETAILED regime);
+   int adjustedMaxCounter = GetMaxCounterPositionsForRegime(regime);
    
    if(CountCounterPositions() >= adjustedMaxCounter) 
    {
@@ -8392,7 +9184,7 @@ double CalculateTrendBasedLot(double trendStrength)
     return NormalizeDouble(baseLot, 2);
 }
 // ===== การเทรดตามเทรนด์ =====
-void ExecuteTrendBuy1(double lot)
+void ExecuteTrendBuy(double lot)
 {
     double tpPoints = Current_TrendScalp_TP_Points; // ใช้พารามิเตอร์ของ Trend Scalp
     double slPoints = TrendScalp_SL_Points; // ใช้พารามิเตอร์ของ Trend Scalp
@@ -8704,7 +9496,7 @@ void ExecuteScalp1(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_UNKNOWN)
 // 🔥 ฟังก์ชัน Helper สำหรับ Scalp1 ตาม Market Regime
 bool IsScalp1AllowedInRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             // ในตลาดผันผวน อาจปิด Scalp1 หรือใช้ strict rules
@@ -8724,7 +9516,7 @@ bool IsScalp1AllowedInRegime(ENUM_MARKET_REGIME_DETAILED regime)
 }
 bool GetScalp1BuyCondition(double ema9, double ema21, double rsiValue, ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             // ในเทรนด์แรง ใช้ RSI range แคบกว่า
@@ -8753,31 +9545,31 @@ bool GetScalp1BuyCondition(double ema9, double ema21, double rsiValue, ENUM_MARK
     }
 }
 
-bool GetScalp1SellCondition(double ema9, double ema21, double rsi, ENUM_MARKET_REGIME_DETAILED regime)
+bool GetScalp1SellCondition(double ema9, double ema21, double rsiValue, ENUM_MARKET_REGIME_DETAILED regime)
+// ✅ เปลี่ยนจาก 'rsi' เป็น 'rsiValue'
 {
     switch(regime)
     {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
-            return (ema9 < ema21 && rsi < 45 && rsi > 25);
+            return (ema9 < ema21 && rsiValue < 45 && rsiValue > 25);
             
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
-            return (ema9 < ema21 && rsi < 40 && rsi > 30);
+            return (ema9 < ema21 && rsiValue < 40 && rsiValue > 30);
             
         case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
-            return (ema9 < ema21 && rsi < 35 && rsi > 20);
+            return (ema9 < ema21 && rsiValue < 35 && rsiValue > 20);
             
         case MARKET_REGIME_RANGING_CALM_DETAILED:
-            return (ema9 < ema21 && rsi < 60 && rsi > 20);
+            return (ema9 < ema21 && rsiValue < 60 && rsiValue > 20);
             
         case MARKET_REGIME_TRENDING_WEAK_DETAILED:
-            return (ema9 < ema21 && rsi < 50 && rsi > 25);
+            return (ema9 < ema21 && rsiValue < 50 && rsiValue > 25);
             
         case MARKET_REGIME_NORMAL:
         default:
-            return (ema9 < ema21 && rsi < 65 && rsi > 20);
+            return (ema9 < ema21 && rsiValue < 65 && rsiValue > 20);
     }
 }
-
 int GetScalp1MaxPositionsForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
     int baseMax = Scalp1_MaxPositions;
@@ -8803,7 +9595,7 @@ int GetScalp1MaxPositionsForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 
 double GetScalp1LotMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return 0.5; // ลด lot 50%
@@ -8827,7 +9619,7 @@ double GetScalp1LotMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 
 double GetScalp1TPMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             return 1.5; // TP ยาวขึ้นในเทรนด์แรง
@@ -8851,7 +9643,7 @@ double GetScalp1TPMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 
 double GetScalp1SLMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return 0.8; // SL แคบลงในตลาดผันผวน
@@ -8869,7 +9661,7 @@ double GetScalp1SLMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 
 bool ShouldUsePriceActionForBuy(ENUM_MARKET_REGIME_DETAILED regime, bool bullishCandle)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return bullishCandle; // ต้องการ bullish candle ในตลาดผันผวน
@@ -8884,7 +9676,7 @@ bool ShouldUsePriceActionForBuy(ENUM_MARKET_REGIME_DETAILED regime, bool bullish
 
 bool ShouldUsePriceActionForSell(ENUM_MARKET_REGIME_DETAILED regime, bool bearishCandle)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return bearishCandle;
@@ -8899,7 +9691,7 @@ bool ShouldUsePriceActionForSell(ENUM_MARKET_REGIME_DETAILED regime, bool bearis
 
 bool IsRegimeSafeForRecovery(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return false; // ไม่ปลอดภัยในตลาดผันผวน
@@ -8956,7 +9748,7 @@ double GetBreakoutTPMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 
 double GetBreakoutSLMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return 0.8; // SL แคบในตลาดผันผวน
@@ -9747,7 +10539,7 @@ double CalculateSafeScalpLot()
 {
    double lot = BaseLot;
    
-   // ?????????????????????????????
+ 
    int currentPositions = CountPositionsByMagic(MAGIC_SCALP1);
    if(currentPositions >= 2)
    {
@@ -10947,7 +11739,7 @@ void ExecuteRangeCalmStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME
 // ฟังก์ชันใหม่ที่รวมทุกอย่าง
 void ExecuteStrategy(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_CALM_DETAILED:
             // Execute calm range strategy
@@ -11143,7 +11935,7 @@ void ExecuteBreakoutStrategyByRegime(ENUM_MARKET_REGIME_DETAILED regime)
     // Check if we should execute breakout strategy
     bool shouldExecute = false;
     
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
@@ -11291,10 +12083,10 @@ double GetLowerBollingerBand(int period = 20, double deviation = 2.0, int shift 
     
     return success ? value[0] : 0;
 }
-void ExecuteAdaptiveStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_UNKNOWN) 
+void ExecuteAdaptiveStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_UNKNOWN_DETAILED) 
 {
     // ตรวจจับ regime ถ้าไม่ได้ส่งมา
-    if(regime == MARKET_REGIME_UNKNOWN) 
+    if(regime == MARKET_REGIME_UNKNOWN_DETAILED) 
     {
         regime = DetectMarketRegime();
     }
@@ -11364,7 +12156,7 @@ void ExecuteNormalStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_NO
     if(regime != MARKET_REGIME_NORMAL)
     {
         // For other regimes, use appropriate strategy
-        switch(ENUM_MARKET_REGIME_DETAILED regime)
+        switch(regime)
         {
             case MARKET_REGIME_TRENDING_STRONG_DETAILED:
                 ExecuteBreakoutStrategy(ENUM_MARKET_REGIME_DETAILED regime);
@@ -11434,7 +12226,7 @@ void AdaptiveParameterAdjustment(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REG
     double winRate = CalculateWinRate(); // ต้องสร้างฟังก์ชันนี้
     
     // ปรับพารามิเตอร์ตาม Performance และ Market Regime
-    switch(ENUM_MARKET_REGIME_DETAILED regime) 
+    switch(regime) 
     {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             // ในเทรนด์แรง สามารถเพิ่ม aggression ได้
@@ -14150,7 +14942,7 @@ void ManageCooperativeStrategies(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REG
 // ฟังก์ชันเพิ่มเติม
 void AdjustCooperativeTarget(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             // ในเทรนด์แรง อาจเพิ่ม target
@@ -14174,7 +14966,7 @@ void AdjustCooperativeStrategiesByRegime(ENUM_MARKET_REGIME_DETAILED regime)
     {
         if(strategies[i].isActive) 
         {
-            switch(ENUM_MARKET_REGIME_DETAILED regime)
+            switch(regime)
             {
                 case MARKET_REGIME_TRENDING_STRONG_DETAILED:
                     // เปิดใช้งาน trend strategies
@@ -14806,7 +15598,7 @@ string GetTradingRecommendations(ENUM_MARKET_REGIME_DETAILED regime)
 {
     string status = "--- 🎯 TRADING RECOMMENDATIONS ---\n";
     
-    switch(ENUM_MARKET_REGIME_DETAILED regime) {
+    switch(regime) {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             status += "✅ STRONG TREND DETECTED\n";
             status += "• Use Trend-following strategies\n";
@@ -14857,14 +15649,14 @@ string GetTradingRecommendations(ENUM_MARKET_REGIME_DETAILED regime)
     }
     
     // Add specific strategy recommendations
-    string bestStrategies = GetRecommendedStrategies(ENUM_MARKET_REGIME_DETAILED regime);
+    string bestStrategies = GetRecommendedStrategies(regime);
     status += "Recommended Strategies: " + bestStrategies + "\n";
     
     return status;
 }
 string GetRecommendedStrategies(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime) {
+    switch(regime) {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             return "TrendScalp, Breakout";
         case MARKET_REGIME_TRENDING_WEAK_DETAILED:
@@ -16872,7 +17664,7 @@ bool CheckRecoveryScalp2Conditions(ENUM_MARKET_REGIME_DETAILED regime, string sy
     bool rsiOversold = (rsi < 30);
     
     // 3. Regime-based adjustments
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_CALM_DETAILED:
             // Good for scalp in calm range
@@ -16922,7 +17714,7 @@ bool CheckRecoveryScalp3Conditions(ENUM_MARKET_REGIME_DETAILED regime, string sy
             IndicatorRelease(bbHandle);
             
             // 3. Regime-based adjustments
-            switch(ENUM_MARKET_REGIME_DETAILED regime)
+            switch(regime)
             {
                 case MARKET_REGIME_RANGING_CALM_DETAILED:
                     return tightRange && bbSqueeze;
@@ -17019,7 +17811,7 @@ bool IsPullbackEntry(string symbol = NULL, ENUM_TIMEFRAMES timeframe = PERIOD_CU
 // ฟังก์ชันตรวจสอบเงื่อนไขตาม Regime
 bool CheckScalp1Conditions(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             // ในตลาดผันผวน range-based
@@ -17587,7 +18379,7 @@ bool CheckTrendConditions(ENUM_MARKET_REGIME_DETAILED regime, string symbol)
     }
     
     // 🔥 ปรับเงื่อนไขตาม Market Regime
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             // สำหรับเทรนด์แรง ตรวจสอบความชันเข้มงวด
@@ -17929,7 +18721,7 @@ bool CheckBreakoutConditions(string symbol, ENUM_MARKET_REGIME_DETAILED regime =
     // ปรับเงื่อนไขตาม regime
     double volumeMultiplier = 1.2; // default
     
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
             volumeMultiplier = 1.5; // ต้องการ volume สูงกว่า
@@ -19156,7 +19948,7 @@ int CountAllOrders()
     
     return total;
 }
-bool ShouldTradeInVolatileMarket(int marketRegime = -1)
+bool ShouldTradeInVolatileMarket(ENUM_MARKET_REGIME_DETAILED marketRegime = MARKET_REGIME_UNKNOWN_DETAILED)
 {
     // ตรวจสอบเฉพาะเมื่อเป็น volatile market
     if(marketRegime == MARKET_REGIME_RANGING_VOLATILE_DETAILED) {
@@ -19798,7 +20590,7 @@ string DetectMarketCondition()
    }
    return "VOLATILE";
 }
-bool IsBreakoutConfirmed(int marketCondition = -1)
+bool IsBreakoutConfirmed(ENUM_MARKET_REGIME_DETAILED marketCondition = MARKET_REGIME_UNKNOWN_DETAILED)
 {
     // 🔥 หากได้รับพารามิเตอร์เฉพาะให้ตรวจสอบตามนั้น
     if(marketCondition == MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED) {
@@ -20095,7 +20887,7 @@ bool ShouldOpenTrade(ENUM_ORDER_TYPE type, ENUM_MARKET_REGIME_DETAILED regime)
     // ===== เงื่อนไขใหม่ตาม Regime =====
     
     // ตรวจสอบ regime-specific conditions
-    switch(ENUM_MARKET_REGIME_DETAILED regime) 
+    switch(regime) 
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             // ในตลาดผันผวน ให้ตรวจสอบเพิ่ม
@@ -20191,7 +20983,7 @@ bool HasMultipleConfirmations(ENUM_ORDER_TYPE type)
 }
 int GetMaxPositionsForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 {
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return 3;  // น้อยลงในตลาดผันผวน
@@ -20340,7 +21132,7 @@ bool IsMarketGoodForTrading(string symbol, ENUM_MARKET_REGIME_DETAILED regime)
     // ตรวจสอบตาม regime
     double volatility = GetMarketVolatility();
     
-    switch(ENUM_MARKET_REGIME_DETAILED regime)
+    switch(regime)
     {
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             return (volatility < 0.02); // ไม่ผันผวนเกินไป
@@ -20687,4 +21479,276 @@ void UseVolatileMarketStrategy()
         OpenSellOrder(); // ใช้ฟังก์ชันเปิดออร์เดอร์ปกติ
         Print("Cautious SELL in volatile market");
     }
+}
+// ========== ADD THIS FUNCTION ==========
+string TrendToString(ENUM_TREND_DIRECTION trend)
+{
+    switch(trend)
+    {
+        case TREND_UP: 
+            return "UP";
+        case TREND_DOWN: 
+            return "DOWN";
+        case TREND_NONE: 
+            return "NEUTRAL";
+        default: 
+            return "UNKNOWN";
+    }
+}
+ENUM_TREND_DIRECTION GetCurrentTrendDirection()
+{
+    // ใช้ MA cross หรือ indicator อื่น
+    double maFast = GetMAValue(10);  // Fast MA (10 periods)
+    double maSlow = GetMAValue(50);  // Slow MA (50 periods)
+    
+    // ใช้ threshold เล็กน้อยเพื่อลด noise
+    double threshold = 0.0001; // หรือใช้ค่าที่เหมาะสมกับสกุลเงิน
+    
+    if(maFast > maSlow + threshold)
+        return TREND_UP;
+    else if(maFast < maSlow - threshold)
+        return TREND_DOWN;
+    else
+        return TREND_NONE;
+}// =======================================
+void ExecuteTrendCounterTrade(double emergencyLot)
+{
+    if(emergencyLot <= 0) 
+    {
+        Print("❌ Invalid emergency lot size: ", emergencyLot);
+        return;
+    }
+    
+    ENUM_TREND_DIRECTION currentTrend = GetCurrentTrendDirection();
+    double trendStrength = CalculateTrendStrength();
+    
+    Print("📈 Executing TREND Counter Trade");
+    Print("   Lot Size: ", emergencyLot);
+    Print("   Trend: ", TrendToString(currentTrend));
+    Print("   Strength: ", trendStrength);
+    
+    if(currentTrend == TREND_UP && trendStrength > 5.0)
+    {
+        // Counter trade ใน uptrend - อาจเปิด buy หรือ sell ตามกลยุทธ์
+        // ตัวเลือก A: เปิดตามเทรนด์ (buy)
+        OpenCounterBuy(emergencyLot, "Trend Counter - Buy");
+        
+        // ตัวเลือก B: เปิด逆向 (sell) สำหรับบางกลยุทธ์
+        // OpenCounterSell(emergencyLot, "Trend Counter - Sell (Contrarian)");
+    }
+    else if(currentTrend == TREND_DOWN && trendStrength > 5.0)
+    {
+        // Counter trade ใน downtrend
+        OpenCounterSell(emergencyLot, "Trend Counter - Sell");
+        
+        // หรือเปิด逆向
+        // OpenCounterBuy(emergencyLot, "Trend Counter - Buy (Contrarian)");
+    }
+    else
+    {
+        // No clear trend - wait or use range strategy
+        Print("   ⚠️ No clear trend for counter trade");
+        ExecuteRangeCounterTrade(emergencyLot);
+    }
+}
+
+void OpenCounterBuy(double lot, string comment)
+{
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double sl = price - (GetCurrentATR(14) * 3.0); // Wider SL for emergency
+    double tp = price + (GetCurrentATR(14) * 2.0); // Quick TP
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lot;
+    request.type = ORDER_TYPE_BUY;
+    request.price = price;
+    request.sl = sl;
+    request.tp = tp;
+    request.deviation = 10;
+    request.magic = MAGIC_EMERGENCY;
+    request.comment = comment;
+    
+    if(OrderSend(request, result))
+    {
+        Print("✅ Counter BUY opened: Ticket #", result.order, 
+              " Lot: ", lot, " SL: ", sl, " TP: ", tp);
+    }
+    else
+    {
+        Print("❌ Counter BUY failed: Error ", result.retcode);
+    }
+}
+
+void OpenCounterSell(double lot, string comment)
+{
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double sl = price + (GetCurrentATR(14) * 3.0);
+    double tp = price - (GetCurrentATR(14) * 2.0);
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lot;
+    request.type = ORDER_TYPE_SELL;
+    request.price = price;
+    request.sl = sl;
+    request.tp = tp;
+    request.deviation = 10;
+    request.magic = MAGIC_EMERGENCY;
+    request.comment = comment;
+    
+    if(OrderSend(request, result))
+    {
+        Print("✅ Counter SELL opened: Ticket #", result.order, 
+              " Lot: ", lot, " SL: ", sl, " TP: ", tp);
+    }
+    else
+    {
+        Print("❌ Counter SELL failed: Error ", result.retcode);
+    }
+}
+void ExecuteRangeCounterTrade(double emergencyLot)
+{
+    Print("📊 Executing RANGE Counter Trade");
+    Print("   Lot Size: ", emergencyLot);
+    
+    // ตรวจสอบ range
+    double rangeHigh = GetRangeHigh();
+    double rangeLow = GetRangeLow();
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    double rangeMiddle = (rangeHigh + rangeLow) / 2;
+    double atrValue = GetCurrentATR(14);
+    
+    Print("   Range High: ", rangeHigh);
+    Print("   Range Low: ", rangeLow);
+    Print("   Current Price: ", currentPrice);
+    
+    if(currentPrice > rangeMiddle)
+    {
+        // ราคาอยู่ครึ่งบนของ range -> โอกาส sell ดีกว่า
+        if(currentPrice > rangeHigh - (atrValue * 0.5))
+        {
+            // ใกล้ขอบบน -> sell
+            OpenCounterSell(emergencyLot * 0.7, "Range Counter - Sell at top");
+        }
+        else
+        {
+            // กลาง range ครึ่งบน -> อาจ wait
+            Print("   ⏸️ Near range top, consider waiting");
+        }
+    }
+    else
+    {
+        // ราคาอยู่ครึ่งล่างของ range -> โอกาส buy ดีกว่า
+        if(currentPrice < rangeLow + (atrValue * 0.5))
+        {
+            // ใกล้ขอบล่าง -> buy
+            OpenCounterBuy(emergencyLot * 0.7, "Range Counter - Buy at bottom");
+        }
+        else
+        {
+            // กลาง range ครึ่งล่าง -> อาจ wait
+            Print("   ⏸️ Near range bottom, consider waiting");
+        }
+    }
+}
+
+
+
+
+void ExecuteBreakoutCounterTrade(double emergencyLot)
+{
+    Print("🚀 Executing BREAKOUT Counter Trade");
+    Print("   Lot Size: ", emergencyLot);
+    
+    // ตรวจสอบ breakout direction
+    bool bullishBreakout = CheckBullishBreakout();
+    bool bearishBreakout = CheckBearishBreakout();
+    
+    if(bullishBreakout)
+    {
+        Print("   📈 Bullish breakout detected");
+        OpenCounterBuy(emergencyLot * 1.2, "Breakout Counter - Buy"); // Larger lot for breakout
+    }
+    else if(bearishBreakout)
+    {
+        Print("   📉 Bearish breakout detected");
+        OpenCounterSell(emergencyLot * 1.2, "Breakout Counter - Sell");
+    }
+    else
+    {
+        Print("   ⚠️ No clear breakout - using default counter");
+        ExecuteDefaultCounterTrade(emergencyLot);
+    }
+}
+
+bool CheckBullishBreakout()
+{
+    double currentHigh = iHigh(_Symbol, _Period, 0);
+    double previousHigh = iHigh(_Symbol, _Period, 1);
+    double atrValue = GetCurrentATR(14);
+    
+    return (currentHigh > previousHigh + (atrValue * 0.3));
+}
+
+bool CheckBearishBreakout()
+{
+    double currentLow = iLow(_Symbol, _Period, 0);
+    double previousLow = iLow(_Symbol, _Period, 1);
+    double atrValue = GetCurrentATR(14);
+    
+    return (currentLow < previousLow - (atrValue * 0.3));
+}
+void ExecuteDefaultCounterTrade(double emergencyLot)
+{
+    Print("🔄 Executing DEFAULT Counter Trade");
+    Print("   Lot Size: ", emergencyLot);
+    
+    // Simple counter trade - opposite of worst position
+    ENUM_POSITION_TYPE worstType = GetWorstPositionType();
+    
+    if(worstType == POSITION_TYPE_BUY)
+    {
+        OpenCounterSell(emergencyLot, "Default Counter - Opposite of worst BUY");
+    }
+    else if(worstType == POSITION_TYPE_SELL)
+    {
+        OpenCounterBuy(emergencyLot, "Default Counter - Opposite of worst SELL");
+    }
+    else
+    {
+        // No positions or can't determine - use trend
+        ExecuteTrendCounterTrade(emergencyLot);
+    }
+}
+
+ENUM_POSITION_TYPE GetWorstPositionType()
+{
+    ulong worstTicket = 0;
+    double worstProfit = 0;
+    ENUM_POSITION_TYPE worstType = WRONG_VALUE;
+    
+    for(int i = 0; i < PositionsTotal(); i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            if(profit < worstProfit)
+            {
+                worstProfit = profit;
+                worstTicket = ticket;
+                worstType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            }
+        }
+    }
+    
+    return worstType;
 }
