@@ -7,142 +7,54 @@
 #property link      "https://www.mql5.com"
 #property version   "1.00"
 #property strict
-#property version   "4.00"
 #property description "Advanced Recovery System with Cooperative Strategy Management"
 
 // --- Includes ---
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
+#include <Trade\SymbolInfo.mqh>
 #include <Trade\AccountInfo.mqh>
+#include <Indicators\Trend.mqh>
+#include <Indicators\Oscilators.mqh>
+#include <Indicators\Volumes.mqh>
 
+// --- Input parameters (Market Analysis & Risk Management) ---
+input group "=== Market Analysis Settings ==="
+input int      MA_Period = 14;
+input int      RSI_Period = 14;
+input double   RSI_Overbought = 70;
+input double   RSI_Oversold = 30;
+input int      ATR_Period = 14;
+input double   ATR_Multiplier = 2.0;
+input bool     UseNewsFilter = false;
+input string   NewsSymbol = "USD";
+input int      NewsMinutesBefore = 30;
+input int      NewsMinutesAfter = 60;
+input bool     UseTimeFilter = true;
+input string   StartHour = "00:00";
+input string   EndHour = "23:59";
+input bool     UseFridayClose = true;
+input int      FridayCloseHour = 20;
 
-CTrade trade;
+input group "=== Risk Management ==="
+input double   LotSize = 0.1;
+input double   MaxRiskPercent = 2.0;
+input int      StopLoss = 50;
+input int      TakeProfit = 100;
+input int      TrailingStop = 30;
+input bool     UseTrailingStop = true;
+input bool     UseBreakEven = true;
+input int      BreakEvenAfter = 20;
+input int      Slippage = 3;
+input bool     UseMaxDailyLoss = true;
+input double   MaxDailyLossPercent = 5.0;
+input bool     UseMaxDailyTrades = true;
+input int      MaxDailyTrades = 10;
+input bool     UseWeeklyProfitTarget = true;
+input double   WeeklyProfitTargetPercent = 10.0;
 
-// --- Globals ---
-datetime lastBarTime = 0;
-bool newBar = false;
-CPositionInfo positionInfo;
-CAccountInfo accountInfo;
-double pointValue = 0;
-int recoveryLayerCount = 0;
-int currentFightingPhase = 0;
-double phaseStartEquity = 0;
-datetime phaseStartTime = 0;
-int fightingTradesCount = 0;
-double totalFightingProfit = 0;
-double TotalPortfolioProfit = 0.0;
-bool recoveryModeActive = false;
-datetime recoveryStartTime = 0;
-double recoveryProgress = 0.0;
-string LastSystemMessage = "";
-datetime MessageTime = 0;
-
-
-// --- Breakeven Visual Variables ---
-string beLineName = "Breakeven_Line";
-double currentBreakevenPrice = 0;
-bool breakevenLineCreated = false;
-
-// --- Fixes & Helpers ---
-const int WRONG_VALUE_CONST = -1;
-enum ENUM_POSITION_TYPE_CUSTOM 
-{
-   POSITION_TYPE_BUY_CUSTOM = 0,
-   POSITION_TYPE_SELL_CUSTOM = 1,
-   POSITION_TYPE_INVALID = -1
-};
-
-enum ENUM_SIGNAL_STRENGTH
-{
-   SIGNAL_NONE = 0,
-   SIGNAL_WEAK = 1,
-   SIGNAL_MEDIUM = 2,
-   SIGNAL_STRONG = 3
-};
-
-#ifndef ENUM_TREND_DIRECTION_DEFINED
-enum ENUM_TREND_DIRECTION
-{
-    TREND_UP = 1,
-    TREND_DOWN = -1,
-    TREND_SIDEWAYS = 0
-};
-#define ENUM_TREND_DIRECTION_DEFINED
-#endif
-// System modes
-enum ENUM_SYSTEM_MODE
-{
-   MODE_NORMAL,
-   MODE_RECOVERY,
-   MODE_HIGH_RISK
-};
-// 🔥 เพิ่มฟังก์ชันใหม่เท่านั้น - ใช้ของเดิมเป็นฐาน
-enum ENUM_MARKET_REGIME_DETAILED
-{
-    MARKET_REGIME_UNKNOWN = 0,
-    MARKET_REGIME_RANGING_CALM = 1,
-    MARKET_REGIME_RANGING_VOLATILE = 2,
-    MARKET_REGIME_TRENDING_WEAK = 3,      // แยกเป็น Weak/Strong
-    MARKET_REGIME_TRENDING_STRONG = 4,
-    MARKET_REGIME_BREAKOUT_POTENTIAL = 5,
-    MARKET_REGIME_HIGH_VOLATILITY = 6,
-    MARKET_REGIME_NEWS_EVENT = 7
-};
-enum ENUM_MARKET_REGIME
-{
-    MARKET_REGIME_UNKNOWN_BASIC = 0,
-    MARKET_REGIME_RANGING_CALM_BASIC = 1,
-    MARKET_REGIME_RANGING_VOLATILE_BASIC = 2,
-    MARKET_REGIME_TRENDING_BASIC = 3,
-    MARKET_REGIME_BREAKOUT_POTENTIAL_BASIC = 4,
-    MARKET_REGIME_HIGH_VOLATILITY_BASIC = 5,
-    MARKET_REGIME_NEWS_EVENT_BASIC = 6
-};
-// เพิ่มบรรทัดนี้ก่อนบรรทัด 89
-
-ENUM_MARKET_REGIME_DETAILED currentMarketRegime = MARKET_REGIME_RANGING_CALM;
-ENUM_SYSTEM_MODE SystemMode = MODE_NORMAL;
-ENUM_MARKET_REGIME_DETAILED g_currentRegime = MARKET_REGIME_RANGING_CALM;    // ✅ global
-
-
-// --- Magic Numbers ---
-#define MAGIC_TEST_SIMPLE 1000 
-#define MAGIC_TREND_SCALP 1001
-#define MAGIC_SCALP1      1002
-#define MAGIC_SCALP1_HF   1003
-#define MAGIC_SCALP2      3003
-#define MAGIC_SCALP3      8008
-#define MAGIC_RECOVERY    2002    
-#define MAGIC_INDIVIDUAL  2011    
-#define MAGIC_ORPHAN      2012    
-#define MAGIC_HEDGE       6006
-#define MAGIC_AI_NEWS     5005
-#define MAGIC_AI_TREND    5006
-#define MAGIC_BREAKOUT    4004
-#define MAGIC_COUNTER     7007
-#define MAGIC_MAIN        9009
-
-#define VOLATILITY_THRESHOLD_LOW 0.002  // 0.2%
-#define VOLATILITY_THRESHOLD_HIGH 0.008 // 0.8%
-#define DIRECTION_UP 1
-#define DIRECTION_DOWN -1
-#define DIRECTION_NEUTRAL 0
-//--------------//
-
-
-
-// 📍 ในส่วน Global Variables หรือ Input Parameters
-input group "=== MAGIC NUMBERS FOR RECOVERY SYSTEMS ==="
-input int MAGIC_INDIVIDUAL_RECOVERY           = 8881;    // Individual Recovery
-input int MAGIC_STEPUP_RECOVERY               = 8882;    // Step-Up Recovery  
-input int MAGIC_COUNTER_RECOVERY              = 8883;    // Counter Position
-input int MAGIC_HEDGE__RECOVERY               = 8884;    // Emergency Hedge
-input int MAGIC_ORPHAN__RECOVERY              = 8885;    // Orphan Management
-input int MAGIC_ULTIMATE__RECOVERY            = 8886;    // Ultimate Fighting
-
-// --- Inputs ---
+// --- Trading Strategy Inputs ---
 input group "=== Main Settings ==="
-input double MaxRiskPercent        = 2.0;
 input double BaseLot               = 0.01;
 input double MaxLot                = 0.50;
 input int    MaxOpenOrders         = 6;
@@ -151,9 +63,9 @@ input int    MinDistance           = 10;
 input double RiskPercent           = 2.0;     
 input bool   UseDynamicDistance    = true;    
 input bool   UseTrendFilter        = true;    
+input int    MagicNumber = 12345;
 
 input group "=== COOPERATIVE TARGET SYSTEM ==="
-
 input double GlobalTargetProfit      = 50.0;
 input double StrategyWeight_Scalp1   = 0.3;
 input double StrategyWeight_Scalp2   = 0.25;
@@ -168,29 +80,6 @@ input double Scalp3_TargetProfit     = 10.0;
 input double Recovery_TargetProfit   = 25.0;
 input double Breakout_TargetProfit   = 100.0;
 input double BaseCollaborativeTarget = 100.0;      
-
-input group "=== Debug Settings ==="
-input bool   EnableDebugMode    = true;
-input bool   ForceTrading       = false;
-input int    DebugPrintLevel    = 2;
-
-input group "=== Test & Manual Settings ==="  
-input int    Test_TP_Points        = 30;
-input int    Test_SL_Points        = 15;
-input int    LowRisk_TP_Points     = 50;
-
-input group "=== Independent Strategies ==="
-input bool   BreakoutStrategy      = true;
-input int    TP_Points_Breakout    = 1500;
-input ENUM_TIMEFRAMES BO_Timeframe = PERIOD_M15;
-input bool   UseMultiTimeframe     = true;
-input bool   UseVolumeConfirmation = true;
-input double MinBreakoutStrength   = 1.5;
-
-input bool   AI_NewsTrading_Enabled    = false;
-input bool   AI_TrendTrading_Enabled   = false;
-input long   AI_News_Magic             = 5005;
-input long   AI_Trend_Magic            = 5006;
 
 input group "=== Simple Trend Scalp Settings ==="
 input bool   SimpleTrendScalpEnabled = true;
@@ -242,18 +131,53 @@ input int    Scalp3_MaxActivePairs  = 3;
 input bool   Scalp3_UseSignal       = false;
 input int    Scalp3_MaxHelpPerMain  = 1;
 
+input group "=== Independent Strategies ==="
+input bool   BreakoutStrategy      = true;
+input int    TP_Points_Breakout    = 1500;
+input ENUM_TIMEFRAMES BO_Timeframe = PERIOD_M15;
+input bool   UseMultiTimeframe     = true;
+input bool   UseVolumeConfirmation = true;
+input double MinBreakoutStrength   = 1.5;
+input bool   AI_NewsTrading_Enabled    = false;
+input bool   AI_TrendTrading_Enabled   = false;
+input long   AI_News_Magic             = 5005;
+input long   AI_Trend_Magic            = 5006;
+
 input group "=== Close Conditions ==="  
 input bool   Close_OnTarget         = true;
 input bool   Close_OnBreakEven      = true;
 input bool   Close_OnHelpProfit     = true;
 input bool   Close_OnReversal       = false;
 
-input group "=== Continuous Battle System ==="
-input bool   EnableContinuousBattle = true;
-input double MinEquityToTrade      = 100.0;
-input bool   NeverGiveUpMode       = true;
-input int    MaxTotalPositions     = 8;
-input double localAggressiveMult = 2.0;
+input group "=== Breakout Strategy Regime Settings ==="
+input bool EnableBreakoutInStrongTrend = true;
+input bool EnableBreakoutInVolatileMarket = false;
+input bool EnableBreakoutInCalmMarket = true;
+input bool EnableBreakoutInWeakTrend = true;
+input bool UseStopLossInBreakout = true;
+input int SL_Points_Breakout = 50;
+
+// --- Recovery System Inputs ---
+input group "=== RECOVERY COOPERATION SYSTEM ==="
+input double Recovery_StartLevel    = -200.0;
+input double Recovery_StopLevel     = -50.0;
+input bool   EnableRecoveryCoop     = true;
+input bool   UseMarketAnalysis    = true;
+input bool   AllowVolatileTrading = false;
+input bool   TradeDuringNews      = false;
+input double MaxLossForNewTrade = -50.0;
+input int    MaxAllowedSpread     = 25;
+input int    MaxRangeOrders       = 3;
+input double MaxRangeDrawdown     = 20.0;
+input bool   UseHedgeInVolatileMarket = true;
+input double MaxDrawdown          = 100.0;
+input int    PartialClosePct      = 50;
+input int    MinTradeDistance         = 50;
+input bool   CheckPreviousOrderLevel  = true;
+input bool  EnableMarketAdaptiveRecovery = true;
+input bool  AllowHighVolatilityTrading = false;
+input bool AutoCalculateBaseTarget = true;
+input double TargetPercentage = 2.0;
 
 input group "=== Step-Up Recovery System ==="
 input bool   StepUpRecoveryEnabled = true;
@@ -265,16 +189,14 @@ input double RecoveryTrigger       = 15.0;
 input double RecoveryTarget        = 5.0;
 input int    RecoveryDistance      = 30;
 
-
-
 input group "=== Counter-Position Management ==="
 input bool   EnableCounterPosition   = true;
 input double localCounterTrigger = 25.0;
 input double CounterProfitTarget     = 15.0;
 input double localCounterMultiplier = 1.2;
 input int    localMaxCounter = 3;
-input double localCounterSL = 50.0;      // SL พื้นฐานใน points
-input double localCounterTP = 100.0;     // TP พื้นฐานใน points
+input double localCounterSL = 50.0;
+input double localCounterTP = 100.0;
 
 input group "=== Individual Recovery Set ==="
 input bool   EnableIndividualRecovery = true;
@@ -301,12 +223,6 @@ input double EmergencyHedgeThreshold = 50.0;
 input double HedgeLotMultiplier    = 1.5;
 input double HedgeProfitTargetUSD  = 20.0;
 
-input group "=== Smart Portfolio Closing ==="  
-input double SmartCloseProfitTarget = 50.0;
-input int    SmartCloseMinPositions = 3;
-input double SmartCloseLotMultiplier = 1.3;
-input int    SmartCloseTPBuffer = 5;
-
 input group "=== ULTIMATE FIGHTING MODE ==="
 input bool   UltimateFightingMode    = true;
 input double FightingAggressionLevel = 1.5;
@@ -316,9 +232,6 @@ input double Phase2Trigger           = 20.0;
 input double Phase3Trigger           = 30.0;
 input double Phase4Trigger           = 40.0;
 input double Phase5Trigger           = 50.0;
-
-input group "=== Display ==="
-input bool   ShowDashboard         = true;
 
 input group "=== Universal Orphan Management ==="
 input bool   EnableUniversalOrphan = true;
@@ -335,42 +248,224 @@ input bool   Orphan_WaitForProfit      = true;
 
 input group "=== Recovery Safety Mechanisms ==="
 input bool   UseRecoverySafety     = true;
-input double MaxTotalLoss          = 100.0;
+double MaxTotalLoss          = 100.0;
 input double MaxDrawdownPercent    = 20.0;
 input int    MaxConsecutiveLosses  = 3;
 input bool   AutoStopRecovery      = true;
 input double SafetyStopThreshold   = 80.0;
 
-// 📍 เพิ่มในส่วน Input Parameters
-input group "=== RECOVERY COOPERATION SYSTEM ==="
-input double Recovery_StartLevel    = -200.0;  // เริ่ม Recovery เมื่อขาดทุนถึง
-input double Recovery_StopLevel     = -50.0;   // หยุด Recovery เมื่อขาดทุนเหลือ
-input bool   EnableRecoveryCoop     = true;    // เปิดใช้งาน Recovery ร่วมมือ
-input bool   UseMarketAnalysis    = true;     // ใช้การวิเคราะห์ตลาด
-input bool   AllowVolatileTrading = false;    // อนุญาตเทรดในตลาดผันผวน
-input bool   TradeDuringNews      = false;    // เทรดในช่วงข่าวเศรษฐกิจ
-input double MaxLossForNewTrade = -50.0;
-input int    MaxAllowedSpread     = 25;       // Spread สูงสุดที่อนุญาต
-input int    MaxRangeOrders       = 3;        // ออร์เดอร์สูงสุดในตลาด Sideway
-input double MaxRangeDrawdown     = 20.0;     // ขาดทุนสูงสุดใน Range Trading
-input bool   UseHedgeInVolatileMarket = true; // ใช้ Hedge ในตลาดผันผวน
-input double MaxDrawdown          = 100.0;
-input int    PartialClosePct      = 50;
-input int    MinTradeDistance         = 50;        // ระยะห่างขั้นต่ำระหว่างออร์เดอร์ (points)
-input bool   CheckPreviousOrderLevel  = true;      // ตรวจสอบระดับออร์เดอร์ก่อนหน้า
-input bool  EnableMarketAdaptiveRecovery = true; // ปรับ Recovery ตามตลาด
-input bool  AllowHighVolatilityTrading = false;
-input bool AutoCalculateBaseTarget = true;
-//input double TargetMultiplier = 1.02;
-input double TargetPercentage = 2.0;  
+input group "=== Smart Portfolio Closing ==="  
+input double SmartCloseProfitTarget = 50.0;
+input int    SmartCloseMinPositions = 3;
+input double SmartCloseLotMultiplier = 1.3;
+input int    SmartCloseTPBuffer = 5;
 
-input group "=== Breakout Strategy Regime Settings ==="
-input bool EnableBreakoutInStrongTrend = true;
-input bool EnableBreakoutInVolatileMarket = false;
-input bool EnableBreakoutInCalmMarket = true;
-input bool EnableBreakoutInWeakTrend = true;
-input bool UseStopLossInBreakout = true;
-input int SL_Points_Breakout = 50;
+input group "=== Continuous Battle System ==="
+input bool   EnableContinuousBattle = true;
+input double MinEquityToTrade      = 100.0;
+input bool   NeverGiveUpMode       = true;
+input int    MaxTotalPositions     = 8;
+input double localAggressiveMult = 2.0;
+
+input group "=== Test & Manual Settings ==="  
+input int    Test_TP_Points        = 30;
+input int    Test_SL_Points        = 15;
+input int    LowRisk_TP_Points     = 50;
+
+input group "=== Debug Settings ==="
+input bool   EnableDebugMode    = true;
+input bool   ForceTrading       = false;
+input int    DebugPrintLevel    = 2;
+
+input group "=== Display ==="
+input bool   ShowDashboard         = true;
+
+input group "=== MAGIC NUMBERS FOR RECOVERY SYSTEMS ==="
+input int MAGIC_INDIVIDUAL_RECOVERY           = 8881;
+input int MAGIC_STEPUP_RECOVERY               = 8882;
+input int MAGIC_COUNTER_RECOVERY              = 8883;
+input int MAGIC_HEDGE__RECOVERY               = 8884;
+input int MAGIC_ORPHAN__RECOVERY              = 8885;
+input int MAGIC_ULTIMATE__RECOVERY            = 8886;
+
+// --- Global Variables (Market Analysis) ---
+CiMA ma;
+CiRSI rsi;
+CiATR atr;
+
+double   g_currentRegime = 0;
+double   g_previousRegime = 0;
+double   g_regimeStrength = 0.0;
+bool     g_regimeChanged = false;
+datetime g_lastRegimeCheck = 0;
+int      g_regimeCheckInterval = 3600;
+
+double   g_dailyProfit = 0.0;
+datetime g_dailyResetTime = 0;
+int      g_dailyTrades = 0;
+double   g_weeklyProfit = 0.0;
+datetime g_weeklyResetTime = 0;
+
+string   g_currentTrend = "NEUTRAL";
+double   g_trendStrength = 0.0;
+double   g_volatility = 0.0;
+double   g_support = 0.0;
+double   g_resistance = 0.0;
+bool     g_isMarketOpen = true;
+
+// News variables
+struct NewsEvent {
+    datetime time;
+    string currency;
+    string importance;
+    string event;
+};
+
+NewsEvent g_newsEvents[];
+int g_newsCount = 0;
+
+// Market regime constants
+#define MARKET_REGIME_UNKNOWN       0
+#define MARKET_REGIME_TRENDING      1
+#define MARKET_REGIME_RANGING       2
+#define MARKET_REGIME_BREAKOUT      3
+#define MARKET_REGIME_VOLATILE      4
+#define MARKET_REGIME_CALM          5
+#define MARKET_REGIME_NORMAL        6
+#define MARKET_REGIME_EXTREME       7
+#define MARKET_REGIME_RECOVERY      8
+#define MARKET_REGIME_DECLINE       9
+#define MARKET_REGIME_SIDEWAYS      10
+#define MARKET_REGIME_ACCUMULATION  11
+#define MARKET_REGIME_DISTRIBUTION  12
+
+// Trading signal structure
+struct TradingSignal {
+    int direction;      // 1 for buy, -1 for sell, 0 for no signal
+    double strength;    // 0.0 to 1.0
+    double entryPrice;
+    double stopLoss;
+    double takeProfit;
+    string reason;
+    datetime expiration;
+};
+
+// --- Trading Objects ---
+CTrade trade;
+CPositionInfo positionInfo;
+CSymbolInfo symbolInfo;
+CAccountInfo accountInfo;
+
+// --- System Status Variables ---
+datetime lastBarTime = 0;
+bool newBar = false;
+double pointValue = 0;
+int recoveryLayerCount = 0;
+int currentFightingPhase = 0;
+double phaseStartEquity = 0;
+datetime phaseStartTime = 0;
+int fightingTradesCount = 0;
+double totalFightingProfit = 0;
+double TotalPortfolioProfit = 0.0;
+bool recoveryModeActive = false;
+datetime recoveryStartTime = 0;
+double recoveryProgress = 0.0;
+string LastSystemMessage = "";
+datetime MessageTime = 0;
+
+// --- Breakeven Visual Variables ---
+string beLineName = "Breakeven_Line";
+double currentBreakevenPrice = 0;
+bool breakevenLineCreated = false;
+
+// --- Fixes & Helpers ---
+const int WRONG_VALUE_CONST = -1;
+
+// --- Enum Definitions ---
+enum ENUM_POSITION_TYPE_CUSTOM 
+{
+   POSITION_TYPE_BUY_CUSTOM = 0,
+   POSITION_TYPE_SELL_CUSTOM = 1,
+   POSITION_TYPE_INVALID = -1
+};
+
+enum ENUM_SIGNAL_STRENGTH
+{
+   SIGNAL_NONE = 0,
+   SIGNAL_WEAK = 1,
+   SIGNAL_MEDIUM = 2,
+   SIGNAL_STRONG = 3
+};
+
+#ifndef ENUM_TREND_DIRECTION_DEFINED
+enum ENUM_TREND_DIRECTION
+{
+    TREND_UP = 1,
+    TREND_DOWN = -1,
+    TREND_SIDEWAYS = 0
+};
+#define ENUM_TREND_DIRECTION_DEFINED
+#endif
+
+// System modes
+enum ENUM_SYSTEM_MODE
+{
+   MODE_NORMAL,
+   MODE_RECOVERY,
+   MODE_HIGH_RISK
+};
+
+// Market regime enums
+enum ENUM_MARKET_REGIME_DETAILED
+{
+    MARKET_REGIME_UNKNOWN_DETAILED = 0,
+    MARKET_REGIME_RANGING_CALM_DETAILED = 1,
+    MARKET_REGIME_RANGING_VOLATILE_DETAILED = 2,
+    MARKET_REGIME_TRENDING_WEAK_DETAILED = 3,
+    MARKET_REGIME_TRENDING_STRONG_DETAILED = 4,
+    MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED = 5,
+    MARKET_REGIME_HIGH_VOLATILITY_DETAILED = 6,
+    MARKET_REGIME_NEWS_EVENT_DETAILED = 7
+};
+
+enum ENUM_MARKET_REGIME_BASIC
+{
+    MARKET_REGIME_UNKNOWN_BASIC = 0,
+    MARKET_REGIME_RANGING_CALM_BASIC = 1,
+    MARKET_REGIME_RANGING_VOLATILE_BASIC = 2,
+    MARKET_REGIME_TRENDING_BASIC = 3,
+    MARKET_REGIME_BREAKOUT_POTENTIAL_BASIC = 4,
+    MARKET_REGIME_HIGH_VOLATILITY_BASIC = 5,
+    MARKET_REGIME_NEWS_EVENT_BASIC = 6
+};
+
+// --- Current System State ---
+ENUM_MARKET_REGIME_DETAILED currentMarketRegime = MARKET_REGIME_RANGING_CALM_DETAILED;
+ENUM_SYSTEM_MODE SystemMode = MODE_NORMAL;
+ENUM_MARKET_REGIME_DETAILED g_currentRegime = MARKET_REGIME_RANGING_CALM_DETAILED;
+
+// --- Magic Numbers ---
+#define MAGIC_TEST_SIMPLE 1000 
+#define MAGIC_TREND_SCALP 1001
+#define MAGIC_SCALP1      1002
+#define MAGIC_SCALP1_HF   1003
+#define MAGIC_SCALP2      3003
+#define MAGIC_SCALP3      8008
+#define MAGIC_RECOVERY    2002    
+#define MAGIC_INDIVIDUAL  2011    
+#define MAGIC_ORPHAN      2012    
+#define MAGIC_HEDGE       6006
+#define MAGIC_AI_NEWS     5005
+#define MAGIC_AI_TREND    5006
+#define MAGIC_BREAKOUT    4004
+#define MAGIC_COUNTER     7007
+#define MAGIC_MAIN        9009
+
+#define VOLATILITY_THRESHOLD_LOW 0.002
+#define VOLATILITY_THRESHOLD_HIGH 0.008
+#define DIRECTION_UP 1
+#define DIRECTION_DOWN -1
+#define DIRECTION_NEUTRAL 0
 
 // --- Cooperative System Variables ---
 struct StrategyStatus {
@@ -386,12 +481,11 @@ struct StrategyStatus {
 };
 
 double g_BaseCollaborativeTarget;
-
 bool currentEnableCooperativeSystem = true;
 string strategyMissionTeam[11];
 double strategyMissionProgress[11];
 
-// 📍 ประกาศ Mission structure
+// Mission structure
 struct MissionData {
     double lotSize;
     bool missionCompleted;
@@ -414,22 +508,20 @@ double breakoutTotalProfit = 0;
 double Current_Scalp1_Lot_Multiplier = 1.0;
 double Current_Scalp2_LotMultiplier = 1.0;
 int Current_TrendScalp_TP_Points = 50;
-double LastRSIValue = 50.0; 
+double LastRSIValue = 50.0;
 
-
+// --- Indicator Handles ---
 int ema9_handle;
 int ema21_handle;
 int ema50_handle;
 int ema9_handle_h1, ema21_handle_h1;
-int ema9_handle_m5, ema21_handle_m5; // สำหรับ timeframe อื่นๆ ถ้าต้องการ
-int rsi_handle_h1, stoch_handle_h1; // สำหรับ indicator อื่นๆ
+int ema9_handle_m5, ema21_handle_m5;
+int rsi_handle_h1, stoch_handle_h1;
 int ema9_handle_m15, ema21_handle_m15;
 int ema50_handle_m15;
 int ema200_handle;
 
-
-
-// ✅ เก็บค่าเดิมสำหรับการ reset
+// --- Original Settings for Reset ---
 double Original_Scalp1_Multiplier = 1.0;
 double Original_Scalp2_Multiplier = 1.0;
 int Original_Trend_TP = 50;
@@ -447,7 +539,7 @@ bool isInBattleMode = false;
 int battlePhase = 0;
 double lastEquity = 0;
 
-// --- New: Variables for Independent Strategies ---
+// --- Independent Strategies Variables ---
 datetime lastBreakoutCheck = 0;
 datetime lastAICheck = 0;
 bool newBarBreakout = false;
@@ -510,6 +602,7 @@ struct RecoverySetOld {
    bool isClosed;
    double setTP;
 };
+
 RecoverySetOld recoverySetsOld[100];
 int totalSets = 0;
 
@@ -562,30 +655,27 @@ datetime lastOrphanCheck = 0;
 int orphanCheckInterval = 1;
 int normalCheckInterval = 60;
 
-//----
-
-
+// --- Market Condition Variables ---
 datetime lastMarketConditionCheck = 0;
 int marketConditionScore = 0;
-//double netMomentum = 0;
 
+// --- General Trading Variables ---
 ulong g_ticket;
-ulong g_currentTicket;       // เปลี่ยนจาก ticket
-double g_netMomentum;        // เปลี่ยนจาก netMomentum  
-string g_missionId;          // เปลี่ยนจาก g_missionId
-
+ulong g_currentTicket;
+double g_netMomentum;
+string g_missionId;
 int CountBuy = 0;
 int CountSell = 0;
 int MaxTrade = 5;
-double GetNetMomentum();
-bool g_EnableCounterPosition = true;
 double currentVolatility = 0;
 int currentSpread = 0;
 double currentTrendStrength = 0.5;
 
+// --- Recovery Multipliers ---
 double currentRecoveryMultiplier = 1.5;
 int currentMaxRecovery = 4;
-// ประกาศตัวแปร global (ที่ส่วนบนของไฟล์)
+
+// --- Strategy Configuration Variables ---
 double g_TP_Multiplier = 1.0;
 double g_Lot_Multiplier = 1.0;
 int g_Max_Orders = 5;
@@ -593,8 +683,7 @@ bool g_Use_Grid = true;
 bool g_Trend_Only = false;
 bool g_Strict_SL = false;
 
-
-// ตัวแปร strategy weights
+// --- Current Strategy Weights ---
 bool currentEnableCounterPosition = EnableCounterPosition;
 double currentStrategyWeight_Trend = StrategyWeight_Trend;
 double currentStrategyWeight_Breakout = StrategyWeight_Breakout;
