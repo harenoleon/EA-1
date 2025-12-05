@@ -247,6 +247,10 @@ int OnInit()
     Print("EA Initialized successfully");
    
    
+   // Set parameters (optional)
+   scalp1.SetParameters(9, 21, 14, 70, 30, 15.0, 1.0, true);
+   
+   
    
    return(INIT_SUCCEEDED);
 }
@@ -275,45 +279,50 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-
    // อัปเดตสภาพตลาด
-    if(UseRegimeAdjustment)
-        teamManager.UpdateMarketRegime();
-    
-    // อัปเดต strategies
-    UpdateAllStrategies();
-    
-    // เช็คว่าต้องเริ่ม recovery หรือไม่
-    if(Recovery_Enabled)
-    {
-        double currentLoss = CalculateCurrentLoss();
-        if(currentLoss <= Recovery_StartLevel) // ← ใช้ Recovery_StartLevel
-        {
-            StartRecoveryMode();
-        }
-    }
-    
-    // รับสัญญาณจากทีม
-    int signalType;
-    double signalStrength;
-    string topStrategy;
-    
-    if(teamManager.GetTeamSignal(signalType, signalStrength, topStrategy))
-    {
-        // ตรวจสอบเงื่อนไขก่อนเปิดออเดอร์
-        if(CheckTradingConditions())
-        {
-            // เปิดออเดอร์ตามสัญญาณ
-            OpenPosition(signalType, signalStrength, topStrategy);
-        }
-    }
-    
-    // จัดการออเดอร์ที่มีอยู่
-    ManageExistingPositions();
-
-   // Update position manager (ตรวจสอบ TP/SL)
-   positionManager.OnTick();
-
+   if(UseRegimeAdjustment)
+      teamManager.UpdateMarketRegime();
+   
+   // ==== แทรกตรงนี้: อัปเดต strategies =====
+   UpdateAllStrategies();
+   // ========================================
+   
+   // อัปเดต position manager (ตรวจสอบ TP/SL)
+   if(positionManager != NULL)
+      positionManager.OnTick();
+   
+   // เช็คว่าต้องเริ่ม recovery หรือไม่
+   if(Recovery_Enabled)
+   {
+      double currentLoss = CalculateCurrentLoss();
+      if(currentLoss <= Recovery_StartLevel)
+      {
+         StartRecoveryMode();
+      }
+   }
+   
+   // รับสัญญาณจากทีม
+   int signalType;
+   double signalStrength;
+   string topStrategy;
+   
+   if(teamManager.GetTeamSignal(signalType, signalStrength, topStrategy))
+   {
+      // ตรวจสอบเงื่อนไขก่อนเปิดออเดอร์
+      if(CheckTradingConditions())
+      {
+         // เปิดออเดอร์ตามสัญญาณ
+         OpenPosition(signalType, signalStrength, topStrategy);
+      }
+   }
+   
+   // ==== แทรกตรงนี้: จัดการ trailing stop =====
+   ManageTrailingStops();
+   // ===========================================
+   
+   // จัดการออเดอร์ที่มีอยู่
+   ManageExistingPositions();
+   
    // Update balance
    totalBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    
@@ -518,13 +527,28 @@ int CountOpenPositions()
 
 void UpdateAllStrategies()
 {
-    // อัปเดตแต่ละ strategy
-    scalp1.Update();
-    scalp2.Update();
-    trend.Update();
-    breakout.Update();
+ if(scalp1 != NULL) scalp1.Update();
+   if(scalp2 != NULL) scalp2.Update();
+   if(trend != NULL) trend.Update();
+   if(breakout != NULL) breakout.Update();
+   
+   // ทุก 100 ticks แสดงสถานะ strategies
+   static int tickCount = 0;
+   if(tickCount++ % 100 == 0)
+   {
+      Print("Strategies updated at tick: ", tickCount);
+   }
 }
-
+//+------------------------------------------------------------------+
+//| จัดการ trailing stops สำหรับ strategies ทั้งหมด                  |
+//+------------------------------------------------------------------+
+void ManageTrailingStops()
+{
+   if(scalp1 != NULL) scalp1.ManageTrailingStop();
+   if(scalp2 != NULL) scalp2.ManageTrailingStop();
+   if(trend != NULL) trend.ManageTrailingStop();
+   if(breakout != NULL) breakout.ManageTrailingStop();
+}
 void SomeStrategyFunction()
 {
    // แทนที่จะใช้ trade.PositionOpen() โดยตรง
