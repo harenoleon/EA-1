@@ -75,7 +75,7 @@ input bool   AdaptiveWeights = true;
 input double RegimeAdaptationSpeed = 0.1;
 input int RegimeCheckMinutes = 5;
 input bool UseRegimeAdjustment = true;
-input double MaxSpread = 3.0;
+
 input int ExpertMagicNumber = 2025;
 input int RegimeCheckInterval = 300; // seconds
 
