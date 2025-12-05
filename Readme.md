@@ -104,20 +104,19 @@ NeverGiveUpEA_Pro/
 │   ├── Core/
 │   │   ├── RecoverySet.mqh
 │   │   ├── OrphanJob.mqh
-│   │   ├── TeamManager.mqh
+│   │   ├── TeamManager.mqh           
 │   │   ├── PortfolioManager.mqh
-│   │   ├── CommonEnums.mqh          
 │   │   ├── MarketRegime.mqh
-│   │   └── **ProfitUniversal.mqh**     
+│   │   └── ProfitUniversal.mqh       
 │   ├── Strategies/
 │   │   ├── BaseStrategy.mqh
-│   │   ├── Scalp1.mqh ยังไม่มี
-│   │   ├── Scalp2.mqh ยังไม่มี
-│   │   ├── TrendEnhanced.mqh 
-│   │   └── Breakout.mqh 
-│   └── **Managers/**
-│       ├── **PositionManager.mqh**     
-│       └── **RiskManager.mqh**         
+│   │   ├── Scalp1Enhanced.mqh        
+│   │   ├── Scalp2Enhanced.mqh        
+│   │   ├── TrendEnhanced.mqh
+│   │   └── Breakout.mqh
+│   └── Managers/
+│       ├── PositionManager.mqh
+│       └── RiskManager.mqh           
 ├── NeverGiveUpEA_Pro.mq5
 └── NeverGiveUpEA_Pro.set
 
