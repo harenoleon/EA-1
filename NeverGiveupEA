@@ -229,7 +229,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-// Delete all objects
+ // Delete all objects
     if(breakout != NULL) delete breakout;
     if(trend != NULL) delete trend;
     if(scalp2 != NULL) delete scalp2;
@@ -240,8 +240,6 @@ void OnDeinit(const int reason)
     if(marketRegime != NULL) delete marketRegime;
     
     Print("EA Deinitialized");
-    
-    EventKillTimer();
 }
 
 //+------------------------------------------------------------------+
