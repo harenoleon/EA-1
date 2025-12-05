@@ -1,0 +1,657 @@
+//+------------------------------------------------------------------+
+//|                                               MarketRegime.mqh   |
+//|                                  Copyright 2025, Never Give Up EA|
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Never Give Up EA"
+#property strict
+#include "/CommonEnums.mqh"
+
+//+------------------------------------------------------------------+
+//| Class: Market Regime Analyzer                                    |
+//+------------------------------------------------------------------+
+class CMarketRegime
+{
+private:
+   ENUM_MARKET_REGIME currentRegime;
+   ENUM_MARKET_DIRECTION currentDirection;
+   double               trendStrength;
+   double               volatilityIndex;
+   double               adxValue;
+   double               atrValue;
+   double               maFast;
+   double               maMedium;
+   double               maSlow;
+   datetime             lastUpdate;
+   bool                 isConfirmed;
+   
+   // Trend detection buffers
+   double               trendScores[3];  // Up, Down, Ranging
+   
+public:
+   CMarketRegime() : currentRegime(EA_REGIME_UNCLEAR),  // ← ใช้ EA_ prefix
+                     currentDirection(EA_DIRECTION_NEUTRAL), // ← ใช้ EA_ prefix
+                     trendStrength(0), 
+                     volatilityIndex(0),
+                     lastUpdate(0), 
+                     isConfirmed(false)
+   {
+      ArrayInitialize(trendScores, 0);
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Update market analysis                                           |
+   //+------------------------------------------------------------------+
+   void UpdateAnalysis()
+   {
+      if(TimeCurrent() - lastUpdate < 60) return; // Update every minute
+      
+      // 1. Calculate technical indicators
+      CalculateIndicators();
+      
+      // 2. Detect market regime
+      DetectRegime();
+      
+      // 3. Calculate trend strength
+      CalculateTrendStrength();
+      
+      // 4. Calculate volatility
+      CalculateVolatility();
+      
+      // 5. Confirm regime
+      ConfirmRegime();
+      
+      lastUpdate = TimeCurrent();
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Calculate technical indicators (MQL5 CORRECT)                    |
+   //+------------------------------------------------------------------+
+   void CalculateIndicators()
+   {
+      // ADX for trend strength (MQL5 syntax)
+      int adxHandle = iADX(_Symbol, PERIOD_H1, 14);
+      double adxBuffer[];
+      ArraySetAsSeries(adxBuffer, true);
+      CopyBuffer(adxHandle, 0, 0, 1, adxBuffer);
+      adxValue = adxBuffer[0];
+      IndicatorRelease(adxHandle);
+      
+      // ATR for volatility (MQL5 syntax)
+      int atrHandle = iATR(_Symbol, PERIOD_M15, 14);
+      double atrBuffer[];
+      ArraySetAsSeries(atrBuffer, true);
+      CopyBuffer(atrHandle, 0, 0, 1, atrBuffer);
+      atrValue = atrBuffer[0];
+      IndicatorRelease(atrHandle);
+      
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(price > 0)
+         volatilityIndex = (atrValue / price) * 100;
+      else
+         volatilityIndex = 0;
+      
+      // Moving averages (MQL5 syntax)
+      int maFastHandle = iMA(_Symbol, PERIOD_M15, 9, 0, MODE_SMA, PRICE_CLOSE);
+      int maMediumHandle = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_SMA, PRICE_CLOSE);
+      int maSlowHandle = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE);
+      
+      double maFastBuffer[], maMediumBuffer[], maSlowBuffer[];
+      ArraySetAsSeries(maFastBuffer, true);
+      ArraySetAsSeries(maMediumBuffer, true);
+      ArraySetAsSeries(maSlowBuffer, true);
+      
+      CopyBuffer(maFastHandle, 0, 0, 1, maFastBuffer);
+      CopyBuffer(maMediumHandle, 0, 0, 1, maMediumBuffer);
+      CopyBuffer(maSlowHandle, 0, 0, 1, maSlowBuffer);
+      
+      maFast = maFastBuffer[0];
+      maMedium = maMediumBuffer[0];
+      maSlow = maSlowBuffer[0];
+      
+      IndicatorRelease(maFastHandle);
+      IndicatorRelease(maMediumHandle);
+      IndicatorRelease(maSlowHandle);
+      
+      // Calculate trend scores
+      trendScores[0] = CalculateUpTrendScore();    // Bullish score
+      trendScores[1] = CalculateDownTrendScore();  // Bearish score
+      trendScores[2] = CalculateRangingScore();    // Ranging score
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Detect market regime                                             |
+   //+------------------------------------------------------------------+
+   void DetectRegime()
+   {
+      // Reset
+      ENUM_MARKET_REGIME newRegime = EA_REGIME_UNCLEAR;
+      ENUM_MARKET_DIRECTION newDirection = EA_DIRECTION_NEUTRAL;
+      
+      // Rule-based detection
+      if(adxValue > 25) // Strong trend
+      {
+         if(trendScores[0] > trendScores[1] && trendScores[0] > trendScores[2])
+         {
+            newRegime = EA_REGIME_TREND_UP;
+            newDirection = EA_DIRECTION_BULLISH;
+         }
+         else if(trendScores[1] > trendScores[0] && trendScores[1] > trendScores[2])
+         {
+            newRegime = EA_REGIME_TREND_DOWN;
+            newDirection = EA_DIRECTION_BEARISH;
+         }
+      }
+      else if(adxValue < 20 && volatilityIndex > 0.5) // High volatility, low trend
+      {
+         newRegime = EA_REGIME_VOLATILE;
+         
+         // Check for potential breakout
+         if(IsBreakoutForming())
+         {
+            if(IsBullishBreakout())
+               newRegime = EA_REGIME_BREAKOUT_UP;
+            else if(IsBearishBreakout())
+               newRegime = EA_REGIME_BREAKOUT_DOWN;
+         }
+      }
+      else if(adxValue < 20 && volatilityIndex < 0.3) // Low volatility, low trend
+      {
+         newRegime = EA_REGIME_RANGING;
+         newDirection = EA_DIRECTION_NEUTRAL;
+      }
+      
+      // Update only if confirmed
+      if(newRegime != EA_REGIME_UNCLEAR)
+      {
+         currentRegime = newRegime;
+         currentDirection = newDirection;
+      }
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Calculate Up Trend Score                                         |
+   //+------------------------------------------------------------------+
+   double CalculateUpTrendScore()
+   {
+      double score = 0;
+      
+      // MA alignment: Fast > Medium > Slow
+      if(maFast > maMedium && maMedium > maSlow)
+         score += 40;
+      
+      // Price above all MAs
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(currentPrice > maFast && currentPrice > maMedium && currentPrice > maSlow)
+         score += 30;
+      
+      // Higher highs & higher lows pattern
+      score += CheckHHHLPattern() * 20;
+      
+      // Bullish MACD (MQL5 syntax)
+      int macdHandle = iMACD(_Symbol, PERIOD_H1, 12, 26, 9, PRICE_CLOSE);
+      double macdMainBuffer[], macdSignalBuffer[];
+      ArraySetAsSeries(macdMainBuffer, true);
+      ArraySetAsSeries(macdSignalBuffer, true);
+      
+      CopyBuffer(macdHandle, MAIN_LINE, 0, 2, macdMainBuffer);
+      CopyBuffer(macdHandle, SIGNAL_LINE, 0, 2, macdSignalBuffer);
+      
+      if(macdMainBuffer[0] > 0 && macdMainBuffer[0] > macdSignalBuffer[0])
+         score += 10;
+      
+      IndicatorRelease(macdHandle);
+      
+      return score;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Calculate Down Trend Score                                       |
+   //+------------------------------------------------------------------+
+   double CalculateDownTrendScore()
+   {
+      double score = 0;
+      
+      // MA alignment: Fast < Medium < Slow
+      if(maFast < maMedium && maMedium < maSlow)
+         score += 40;
+      
+      // Price below all MAs
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(currentPrice < maFast && currentPrice < maMedium && currentPrice < maSlow)
+         score += 30;
+      
+      // Lower highs & lower lows pattern
+      score += CheckLHLPattern() * 20;
+      
+      // Bearish MACD (MQL5 syntax)
+      int macdHandle = iMACD(_Symbol, PERIOD_H1, 12, 26, 9, PRICE_CLOSE);
+      double macdMainBuffer[], macdSignalBuffer[];
+      ArraySetAsSeries(macdMainBuffer, true);
+      ArraySetAsSeries(macdSignalBuffer, true);
+      
+      CopyBuffer(macdHandle, MAIN_LINE, 0, 2, macdMainBuffer);
+      CopyBuffer(macdHandle, SIGNAL_LINE, 0, 2, macdSignalBuffer);
+      
+      if(macdMainBuffer[0] < 0 && macdMainBuffer[0] < macdSignalBuffer[0])
+         score += 10;
+      
+      IndicatorRelease(macdHandle);
+      
+      return score;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Calculate Ranging Score                                          |
+   //+------------------------------------------------------------------+
+   double CalculateRangingScore()
+   {
+      double score = 0;
+      
+      // MAs are flat and close together
+      double maSpread = MathAbs(maFast - maSlow) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      if(maSpread < 500) // Less than 50 pips apart
+         score += 40;
+      
+      // Price oscillating between support/resistance
+      if(IsPriceInRange())
+         score += 30;
+      
+      // Low ATR relative to average
+      double atrPercent = (atrValue / SymbolInfoDouble(_Symbol, SYMBOL_BID)) * 100;
+      if(atrPercent < 0.3)
+         score += 20;
+      
+      // RSI oscillating around 50 (MQL5 syntax)
+      int rsiHandle = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE);
+      double rsiBuffer[];
+      ArraySetAsSeries(rsiBuffer, true);
+      CopyBuffer(rsiHandle, 0, 0, 1, rsiBuffer);
+      double rsi = rsiBuffer[0];
+      IndicatorRelease(rsiHandle);
+      
+      if(rsi > 40 && rsi < 60)
+         score += 10;
+      
+      return score;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Check for Higher Highs & Higher Lows                             |
+   //+------------------------------------------------------------------+
+   double CheckHHHLPattern()
+   {
+      double hArray[], lArray[];
+      ArraySetAsSeries(hArray, true);
+      ArraySetAsSeries(lArray, true);
+      
+      // Copy 3 latest highs and lows
+      CopyHigh(_Symbol, PERIOD_H1, 1, 3, hArray);
+      CopyLow(_Symbol, PERIOD_H1, 1, 3, lArray);
+      
+      double patternScore = 0;
+      
+      if(hArray[0] > hArray[1] && hArray[1] > hArray[2]) patternScore += 0.5; // Higher highs
+      if(lArray[0] > lArray[1] && lArray[1] > lArray[2]) patternScore += 0.5; // Higher lows
+      
+      return patternScore;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Check for Lower Highs & Lower Lows                               |
+   //+------------------------------------------------------------------+
+   double CheckLHLPattern()
+   {
+      double hArray[], lArray[];
+      ArraySetAsSeries(hArray, true);
+      ArraySetAsSeries(lArray, true);
+      
+      // Copy 3 latest highs and lows
+      CopyHigh(_Symbol, PERIOD_H1, 1, 3, hArray);
+      CopyLow(_Symbol, PERIOD_H1, 1, 3, lArray);
+      
+      double patternScore = 0;
+      
+      if(hArray[0] < hArray[1] && hArray[1] < hArray[2]) patternScore += 0.5; // Lower highs
+      if(lArray[0] < lArray[1] && lArray[1] < lArray[2]) patternScore += 0.5; // Lower lows
+      
+      return patternScore;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Check if price is in range                                       |
+   //+------------------------------------------------------------------+
+   bool IsPriceInRange()
+   {
+      double highArray[], lowArray[];
+      ArraySetAsSeries(highArray, true);
+      ArraySetAsSeries(lowArray, true);
+      
+      // Copy 20 latest highs and lows
+      CopyHigh(_Symbol, PERIOD_H4, 1, 20, highArray);
+      CopyLow(_Symbol, PERIOD_H4, 1, 20, lowArray);
+      
+      // Find highest high and lowest low
+      double high20 = highArray[ArrayMaximum(highArray)];
+      double low20 = lowArray[ArrayMinimum(lowArray)];
+      
+      double rangeHeight = high20 - low20;
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+      // If price is within 30% of range from either boundary
+      double distanceFromHigh = MathAbs(high20 - currentPrice);
+      double distanceFromLow = MathAbs(currentPrice - low20);
+      
+      return (distanceFromHigh < rangeHeight * 0.3 && distanceFromLow < rangeHeight * 0.3);
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Check for breakout formation                                     |
+   //+------------------------------------------------------------------+
+   bool IsBreakoutForming()
+   {
+      double highArray[], lowArray[];
+      ArraySetAsSeries(highArray, true);
+      ArraySetAsSeries(lowArray, true);
+      
+      // Copy 10 latest highs and lows
+      CopyHigh(_Symbol, PERIOD_H4, 1, 10, highArray);
+      CopyLow(_Symbol, PERIOD_H4, 1, 10, lowArray);
+      
+      double rangeHigh = highArray[ArrayMaximum(highArray)];
+      double rangeLow = lowArray[ArrayMinimum(lowArray)];
+      
+      double rangeHeight = rangeHigh - rangeLow;
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+      // Price approaching range boundary (within 20% of range height)
+      double upperThreshold = rangeHigh - (rangeHeight * 0.2);
+      double lowerThreshold = rangeLow + (rangeHeight * 0.2);
+      
+      return (currentPrice >= upperThreshold || currentPrice <= lowerThreshold);
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Check for bullish breakout                                       |
+   //+------------------------------------------------------------------+
+   bool IsBullishBreakout()
+   {
+      double highArray[], lowArray[];
+      long volumeArray[];  // ← เปลี่ยนจาก double เป็น long
+      ArraySetAsSeries(highArray, true);
+      ArraySetAsSeries(lowArray, true);
+      ArraySetAsSeries(volumeArray, true);
+      
+      // Copy data
+      CopyHigh(_Symbol, PERIOD_H4, 1, 10, highArray);
+      CopyLow(_Symbol, PERIOD_H4, 1, 10, lowArray);
+      CopyTickVolume(_Symbol, PERIOD_H1, 0, 2, volumeArray);  // ← volumeArray เป็น long[]
+      
+      double rangeHigh = highArray[ArrayMaximum(highArray)];
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+      // Price broke above resistance
+      if(currentPrice > rangeHigh)
+      {
+         // Check for increasing volume
+         long volumeNow = volumeArray[0];
+         long volumePrev = volumeArray[1];
+         
+         return (volumeNow > volumePrev * 1.2);
+      }
+      
+      return false;
+   }
+      
+   //+------------------------------------------------------------------+
+   //| Check for bearish breakout                                       |
+   //+------------------------------------------------------------------+
+   bool IsBearishBreakout()
+   {
+      double highArray[], lowArray[];
+      long volumeArray[];  // ← เปลี่ยนจาก double เป็น long
+      ArraySetAsSeries(highArray, true);
+      ArraySetAsSeries(lowArray, true);
+      ArraySetAsSeries(volumeArray, true);
+      
+      // Copy data
+      CopyHigh(_Symbol, PERIOD_H4, 1, 10, highArray);
+      CopyLow(_Symbol, PERIOD_H4, 1, 10, lowArray);
+      CopyTickVolume(_Symbol, PERIOD_H1, 0, 2, volumeArray);  // ← volumeArray เป็น long[]
+      
+      double rangeLow = lowArray[ArrayMinimum(lowArray)];
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+      // Price broke below support
+      if(currentPrice < rangeLow)
+      {
+         // Check for increasing volume
+         long volumeNow = volumeArray[0];
+         long volumePrev = volumeArray[1];
+         
+         return (volumeNow > volumePrev * 1.2);
+      }
+      
+      return false;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Calculate trend strength                                         |
+   //+------------------------------------------------------------------+
+   void CalculateTrendStrength()
+   {
+      trendStrength = adxValue / 100.0; // Normalize to 0-1
+      
+      // Adjust based on multiple timeframes (MQL5 syntax)
+      int adxM15Handle = iADX(_Symbol, PERIOD_M15, 14);
+      int adxH1Handle = iADX(_Symbol, PERIOD_H1, 14);
+      int adxH4Handle = iADX(_Symbol, PERIOD_H4, 14);
+      
+      double adxM15Buffer[], adxH1Buffer[], adxH4Buffer[];
+      ArraySetAsSeries(adxM15Buffer, true);
+      ArraySetAsSeries(adxH1Buffer, true);
+      ArraySetAsSeries(adxH4Buffer, true);
+      
+      CopyBuffer(adxM15Handle, 0, 0, 1, adxM15Buffer);
+      CopyBuffer(adxH1Handle, 0, 0, 1, adxH1Buffer);
+      CopyBuffer(adxH4Handle, 0, 0, 1, adxH4Buffer);
+      
+      double adxM15 = adxM15Buffer[0];
+      double adxH1 = adxH1Buffer[0];
+      double adxH4 = adxH4Buffer[0];
+      
+      trendStrength = (adxM15 * 0.3 + adxH1 * 0.4 + adxH4 * 0.3) / 100.0;
+      
+      IndicatorRelease(adxM15Handle);
+      IndicatorRelease(adxH1Handle);
+      IndicatorRelease(adxH4Handle);
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Calculate volatility                                             |
+   //+------------------------------------------------------------------+
+   void CalculateVolatility()
+   {
+      // ATR based volatility (MQL5 syntax)
+      int atrM5Handle = iATR(_Symbol, PERIOD_M5, 14);
+      int atrM15Handle = iATR(_Symbol, PERIOD_M15, 14);
+      int atrH1Handle = iATR(_Symbol, PERIOD_H1, 14);
+      
+      double atrM5Buffer[], atrM15Buffer[], atrH1Buffer[];
+      ArraySetAsSeries(atrM5Buffer, true);
+      ArraySetAsSeries(atrM15Buffer, true);
+      ArraySetAsSeries(atrH1Buffer, true);
+      
+      CopyBuffer(atrM5Handle, 0, 0, 1, atrM5Buffer);
+      CopyBuffer(atrM15Handle, 0, 0, 1, atrM15Buffer);
+      CopyBuffer(atrH1Handle, 0, 0, 1, atrH1Buffer);
+      
+      double atrM5 = atrM5Buffer[0];
+      double atrM15 = atrM15Buffer[0];
+      double atrH1 = atrH1Buffer[0];
+      
+      double avgAtr = (atrM5 + atrM15 + atrH1) / 3;
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+      if(price > 0)
+         volatilityIndex = (avgAtr / price) * 100;
+      else
+         volatilityIndex = 0;
+      
+      IndicatorRelease(atrM5Handle);
+      IndicatorRelease(atrM15Handle);
+      IndicatorRelease(atrH1Handle);
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Confirm regime with multiple timeframe analysis                  |
+   //+------------------------------------------------------------------+
+   void ConfirmRegime()
+   {
+      isConfirmed = false;
+      
+      // Check consistency across timeframes
+      ENUM_MARKET_REGIME m15Regime = GetRegimeForTimeframe(PERIOD_M15);
+      ENUM_MARKET_REGIME h1Regime = GetRegimeForTimeframe(PERIOD_H1);
+      ENUM_MARKET_REGIME h4Regime = GetRegimeForTimeframe(PERIOD_H4);
+      
+      // If at least 2 timeframes agree
+      int sameCount = 0;
+      if(m15Regime == currentRegime) sameCount++;
+      if(h1Regime == currentRegime) sameCount++;
+      if(h4Regime == currentRegime) sameCount++;
+      
+      isConfirmed = (sameCount >= 2);
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Get regime for specific timeframe                                |
+   //+------------------------------------------------------------------+
+   ENUM_MARKET_REGIME GetRegimeForTimeframe(ENUM_TIMEFRAMES tf)
+   {
+      // Get ADX for timeframe
+      int adxHandle = iADX(_Symbol, tf, 14);
+      double adxBuffer[];
+      ArraySetAsSeries(adxBuffer, true);
+      CopyBuffer(adxHandle, 0, 0, 1, adxBuffer);
+      double adx = adxBuffer[0];
+      IndicatorRelease(adxHandle);
+      
+      // Get MAs for timeframe
+      int maFastHandle = iMA(_Symbol, tf, 9, 0, MODE_SMA, PRICE_CLOSE);
+      int maSlowHandle = iMA(_Symbol, tf, 50, 0, MODE_SMA, PRICE_CLOSE);
+      
+      double maFastBuffer[], maSlowBuffer[];
+      ArraySetAsSeries(maFastBuffer, true);
+      ArraySetAsSeries(maSlowBuffer, true);
+      
+      CopyBuffer(maFastHandle, 0, 0, 1, maFastBuffer);
+      CopyBuffer(maSlowHandle, 0, 0, 1, maSlowBuffer);
+      
+      double maFastTF = maFastBuffer[0];
+      double maSlowTF = maSlowBuffer[0];
+      
+      IndicatorRelease(maFastHandle);
+      IndicatorRelease(maSlowHandle);
+      
+      if(adx > 25)
+      {
+         return (maFastTF > maSlowTF) ? EA_REGIME_TREND_UP : EA_REGIME_TREND_DOWN;
+      }
+      else if(adx < 20)
+      {
+         return EA_REGIME_RANGING;
+      }
+      
+      return EA_REGIME_UNCLEAR;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Get current regime                                               |
+   //+------------------------------------------------------------------+
+   ENUM_MARKET_REGIME GetCurrentRegime() const { return currentRegime; }
+   
+   //+------------------------------------------------------------------+
+   //| Get market direction                                             |
+   //+------------------------------------------------------------------+
+   ENUM_MARKET_DIRECTION GetMarketDirection() const { return currentDirection; }
+   
+   //+------------------------------------------------------------------+
+   //| Get trend strength (0-1)                                         |
+   //+------------------------------------------------------------------+
+   double GetTrendStrength() const { return trendStrength; }
+   
+   //+------------------------------------------------------------------+
+   //| Get volatility index                                             |
+   //+------------------------------------------------------------------+
+   double GetVolatilityIndex() const { return volatilityIndex; }
+   
+   //+------------------------------------------------------------------+
+   //| Is regime confirmed?                                             |
+   //+------------------------------------------------------------------+
+   bool IsConfirmed() const { return isConfirmed; }
+   
+   //+------------------------------------------------------------------+
+   //| Get regime as string                                             |
+   //+------------------------------------------------------------------+
+   string GetRegimeString() const
+   {
+      switch(currentRegime)
+      {
+         case EA_REGIME_TREND_UP:       return "TREND UP";
+         case EA_REGIME_TREND_DOWN:     return "TREND DOWN";
+         case EA_REGIME_RANGING:        return "RANGING";
+         case EA_REGIME_BREAKOUT_UP:    return "BREAKOUT UP";
+         case EA_REGIME_BREAKOUT_DOWN:  return "BREAKOUT DOWN";
+         case EA_REGIME_VOLATILE:       return "VOLATILE";
+         case EA_REGIME_UNCLEAR:        return "UNCLEAR";
+         default:                       return "UNKNOWN";
+      }
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Should trade in direction? (For Recovery Mode)                  |
+   //+------------------------------------------------------------------+
+   bool ShouldTradeDirection(ENUM_ORDER_TYPE type) const
+   {
+      if(!isConfirmed) return true; // Allow both directions if unclear
+      
+      // In strong trend, only trade with trend
+      if(trendStrength > 0.7)
+      {
+         if(currentDirection == EA_DIRECTION_BULLISH && type != ORDER_TYPE_BUY)
+            return false;
+         if(currentDirection == EA_DIRECTION_BEARISH && type != ORDER_TYPE_SELL)
+            return false;
+      }
+      
+      return true;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Get recommended position size multiplier                         |
+   //+------------------------------------------------------------------+
+   double GetPositionSizeMultiplier() const
+   {
+      if(!isConfirmed) return 0.5; // Smaller size if unclear
+      
+      switch(currentRegime)
+      {
+         case EA_REGIME_TREND_UP:
+         case EA_REGIME_TREND_DOWN:
+            return 1.2; // Larger size in strong trend
+         
+         case EA_REGIME_BREAKOUT_UP:
+         case EA_REGIME_BREAKOUT_DOWN:
+            return 1.0; // Normal size
+         
+         case EA_REGIME_RANGING:
+            return 0.7; // Smaller size in ranging
+         
+         case EA_REGIME_VOLATILE:
+            return 0.5; // Much smaller size in high volatility
+         
+         default:
+            return 1.0;
+      }
+   }
+};
