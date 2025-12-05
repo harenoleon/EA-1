@@ -24,11 +24,19 @@
 #include "Include/Strategies/Breakout.mqh"
 
 //--- Input Parameters
-// --- Recovery & Global Target ---
+// --- Global Target ---//
 input double SmartCloseProfitTarget = 50.0;     // ปิดเมื่อถึงเป้านี้
 input int    SmartCloseMinPositions = 3;        // ต้องมีออเดอร์ ≥ 3 ตัว
-input double Recovery_StartLevel    = -200.0;   // เริ่ม Recovery เมื่อขาดทุนถึง
-input double Recovery_StopLevel     = -50.0;    // กลับสู่โหมดปกติเมื่อขาดทุนลดลง
+
+// --- Recovery //
+input string   Recovery_Settings        = "=== Recovery Settings ==="; // Recovery Settings
+input bool     Recovery_Enabled         = true;                        // Enable Recovery System
+input double   Recovery_StartLevel      = -200.0;                      // Recovery Start Level ($)
+input double   Recovery_StopLevel       = -50.0;
+input int      Recovery_MaxCycles       = 3;                           // Max Recovery Cycles
+input bool     Recovery_UseGrid         = true;                        // Use Grid Recovery
+input double   Recovery_GridMultiplier  = 1.5;                         // Grid Multiplier
+input int      Recovery_GridSteps       = 3;                           // Grid Steps
 
 // --- Orphan System ---
 input bool   EnableUniversalOrphan = true;
@@ -54,6 +62,13 @@ input ulong  MAGIC_RECOVERY  = 20000;
 input ulong  MAGIC_ORPHAN    = 30000;
 
 // --- Market Regime ---
+input string TradingSettings = "=== Trading Settings ===";
+input double RiskPercent = 2.0;
+input bool UseMartingale = false;
+input double MartingaleMultiplier = 2.0;
+input int MaxOrders = 10;
+input double MaxSpread = 3.0;
+
 input string MarketRegimeSettings = "=== Market Regime Settings ===";
 input bool   EnableMarketRegime = true;
 input bool   AdaptiveWeights = true;
@@ -62,6 +77,13 @@ input int RegimeCheckMinutes = 5;
 input bool UseRegimeAdjustment = true;
 input double MaxSpread = 3.0;
 input int ExpertMagicNumber = 2025;
+input int RegimeCheckInterval = 300; // seconds
+
+input string StrategySettings = "=== Strategy Settings ===";
+input double Scalp1Weight = 0.25;
+input double Scalp2Weight = 0.25;
+input double TrendWeight = 0.25;
+input double BreakoutWeight = 0.25;
 
 // --- Advanced Recovery ---
 input bool   IntelligentRecovery = true;     // Recovery ฉลาดเลือกทิศทาง
@@ -254,6 +276,16 @@ void OnTick()
     
     // อัปเดต strategies
     UpdateAllStrategies();
+    
+    // เช็คว่าต้องเริ่ม recovery หรือไม่
+    if(Recovery_Enabled)
+    {
+        double currentLoss = CalculateCurrentLoss();
+        if(currentLoss <= Recovery_StartLevel) // ← ใช้ Recovery_StartLevel
+        {
+            StartRecoveryMode();
+        }
+    }
     
     // รับสัญญาณจากทีม
     int signalType;
@@ -1294,4 +1326,41 @@ void CheckJobCompletion()
 {
    // Periodic check for completed jobs
    // (Called by timer)
+}
+//+------------------------------------------------------------------+
+//| Check if recovery should start                                   |
+//+------------------------------------------------------------------+
+bool ShouldStartRecovery()
+{
+    if(!Recovery_Enabled)
+        return false;
+    
+    double currentLoss = CalculateCurrentLoss(); // คำนวณ loss ปัจจุบัน
+    
+    if(currentLoss <= Recovery_StartLevel) // ← ใช้ Recovery_StartLevel
+    {
+        Print("Recovery triggered at loss: $", currentLoss);
+        return true;
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate current loss in dollars                                |
+//+------------------------------------------------------------------+
+double CalculateCurrentLoss()
+{
+    double totalProfit = 0.0;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol && 
+           PositionGetInteger(POSITION_MAGIC) == ExpertMagicNumber)
+        {
+            totalProfit += PositionGetDouble(POSITION_PROFIT);
+        }
+    }
+    
+    return totalProfit;
 }
