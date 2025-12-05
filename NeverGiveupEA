@@ -23,6 +23,9 @@
 #include "Include/Strategies/TrendEnhanced.mqh"
 #include "Include/Strategies/Breakout.mqh"
 
+#include "Include/Managers/RecoverySet.mqh"           // สำหรับ RecoverySet
+#include "Include/Managers/OrphanJob.mqh"             // สำหรับ COrphanJob
+
 //--- Input Parameters
 // --- Global Target ---//
 input double SmartCloseProfitTarget = 50.0;     // ปิดเมื่อถึงเป้านี้
@@ -104,14 +107,14 @@ input double   BreakEvenAt           = 1.0;      // เคลื่อนที�
 
 //--- Global Variables
 CTrade trade;
-CMarketRegime* marketRegime;
-CTeamManager* teamManager;
+
+TeamManager* teamManager;
 
 // Managers
 CPositionManager  positionManager;
 
 // Core Systems
-MarketRegime     marketRegime;
+CMarketRegime* marketRegime;
 PortfolioManager  portfolio;
 TeamManager       team;                     // ใช้ TeamManager (แต่เป็น Enhanced version)
 
@@ -210,6 +213,9 @@ int OnInit()
     scalp2 = new CScalp2Enhanced();
     trend = new CTrendEnhanced();
     breakout = new CBreakout();
+    
+    recoverySets = new RecoverySet();
+    orphanJobs = new COrphanJob();
     
     // Initialize market regime
     if(marketRegime != NULL)
