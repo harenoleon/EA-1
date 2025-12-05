@@ -1,0 +1,1299 @@
+//+------------------------------------------------------------------+
+//|                                            NeverGiveUpEA_Pro.mq5 |
+//|                                  Copyright 2025, Never Give Up EA |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Never Give Up EA"
+#property version   "2.00"
+#property strict
+
+#include <Trade/Trade.mqh>
+
+// Core includes
+#include "Include/Core/MarketRegime.mqh"
+#include "Include/Core/TeamManagerEnhanced.mqh"      // ยังใช้ชื่อเดิม แต่เป็น Enhanced version
+#include "Include/Core/PortfolioManager.mqh"
+#include "Include/Core/CommonEnums.mqh"
+
+// Manager includes
+#include "Include/Managers/PositionManager.mqh"
+
+// Strategy includes
+#include "Include/Strategies/Scalp1Enhanced.mqh"   // เปลี่ยนชื่อ
+#include "Include/Strategies/Scalp2Enhanced.mqh"   // เปลี่ยนชื่อ
+#include "Include/Strategies/TrendEnhanced.mqh"
+#include "Include/Strategies/Breakout.mqh"
+
+//--- Input Parameters
+// --- Recovery & Global Target ---
+input double SmartCloseProfitTarget = 50.0;     // ปิดเมื่อถึงเป้านี้
+input int    SmartCloseMinPositions = 3;        // ต้องมีออเดอร์ ≥ 3 ตัว
+input double Recovery_StartLevel    = -200.0;   // เริ่ม Recovery เมื่อขาดทุนถึง
+input double Recovery_StopLevel     = -50.0;    // กลับสู่โหมดปกติเมื่อขาดทุนลดลง
+
+// --- Orphan System ---
+input bool   EnableUniversalOrphan = true;
+input double OrphanCloseProfit = 5.0;
+
+// --- Team Weights ---
+input double StrategyWeight_Scalp1   = 0.3;
+input double StrategyWeight_Scalp2   = 0.25;
+input double StrategyWeight_Trend    = 0.15;
+input double StrategyWeight_Breakout = 0.3;
+
+// --- Risk Management ---
+input double MaxLotSize      = 0.5;
+input double RiskPerTrade    = 0.02;    // 2% of balance
+input bool   EnableAutoLot   = true;
+
+// --- Magic Numbers ---
+input ulong  MAGIC_SCALP1    = 10001;
+input ulong  MAGIC_SCALP2    = 10002;
+input ulong  MAGIC_TREND     = 10003;
+input ulong  MAGIC_BREAKOUT  = 10004;
+input ulong  MAGIC_RECOVERY  = 20000;
+input ulong  MAGIC_ORPHAN    = 30000;
+
+// --- Market Regime ---
+input string MarketRegimeSettings = "=== Market Regime Settings ===";
+input bool   EnableMarketRegime = true;
+input bool   AdaptiveWeights = true;
+input double RegimeAdaptationSpeed = 0.1;
+input int RegimeCheckMinutes = 5;
+input bool UseRegimeAdjustment = true;
+input double MaxSpread = 3.0;
+input int ExpertMagicNumber = 2025;
+
+// --- Advanced Recovery ---
+input bool   IntelligentRecovery = true;     // Recovery ฉลาดเลือกทิศทาง
+input double VolatilityLotReduction = 0.7;   // ลดล็อตเมื่อผันผวนสูง
+
+// --- Profit & Risk Management ---
+input group "Profit & Risk Management"
+input double   BaseProfitTarget      = 50.0;     // กำไรฐานต่อออเดอร์
+input double   RiskRewardRatio       = 1.5;      // Risk:Reward
+input bool     UseMultiLevelTP       = true;     // ใช้ TP หลายระดับ
+input bool     UseDynamicTP          = true;     // ปรับ TP ตามตลาด
+input bool     UseRegimeBasedTP      = true;     // ปรับตามสภาพตลาด
+input bool     UseTrailingStop       = true;     // ใช้ Trailing Stop
+input double   TrailingStart         = 1.0;      // เริ่ม trailing ที่ (ใน $)
+input double   TrailingStep          = 0.5;      // ขั้น trailing
+input bool     UseBreakEven          = true;     // เคลื่อน SL ไป Break-even
+input double   BreakEvenAt           = 1.0;      // เคลื่อนที่กำไร (ใน $)
+
+//--- Global Variables
+CTrade trade;
+CMarketRegime* marketRegime;
+CTeamManager* teamManager;
+
+// Managers
+CPositionManager  positionManager;
+
+// Core Systems
+MarketRegime     marketRegime;
+PortfolioManager  portfolio;
+TeamManager       team;                     // ใช้ TeamManager (แต่เป็น Enhanced version)
+
+// Strategies
+CScalp1Enhanced   scalp1;                   // เปลี่ยนชื่อ
+CScalp2Enhanced   scalp2;                   // เปลี่ยนชื่อ
+CTrendEnhanced    trend;
+CBreakout         breakout;
+
+// Recovery Systems
+RecoverySet       recoverySets[50];
+COrphanJob        orphanJobs[20];
+int               setCount = 0;
+int               jobCount = 0;
+
+// State Variables
+bool              isRecoveryMode = false;
+double            totalBalance;
+datetime          lastRegimePrint = 0;
+datetime          lastCheckTime = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+      positionManager.Initialize(
+         GetPointer(marketRegime),           // Market regime
+         BaseProfitTarget,                   // 50.0
+         RiskRewardRatio,                    // 1.5
+         UseMultiLevelTP,                    // true
+         UseDynamicTP,                       // true
+         UseRegimeBasedTP,                   // true
+         UseTrailingStop,                    // true
+         TrailingStart,                      // 1.0
+         TrailingStep,                       // 0.5
+         UseBreakEven,                       // true
+         BreakEvenAt                         // 1.0
+      );
+   
+   // Set position manager to strategies
+   scalp1.SetPositionManager(GetPointer(positionManager));
+   scalp2.SetPositionManager(GetPointer(positionManager));
+   trend.SetPositionManager(GetPointer(positionManager));
+   breakout.SetPositionManager(GetPointer(positionManager));
+
+   
+   // Initialize Profit Universal
+   profitUniversal.Initialize(50.0, 1.5, true, true, true);
+   profitUniversal.SetMarketRegime(GetPointer(marketRegime));
+   
+   // Initialize Position Manager
+   positionManager.profitUniversal = GetPointer(profitUniversal);
+   positionManager.Initialize(GetPointer(marketRegime));
+   
+   // Initialize market regime analyzer
+   marketRegime.UpdateAnalysis();
+   
+   // Initialize portfolio manager
+   portfolio.Initialize(SmartCloseProfitTarget, SmartCloseMinPositions);
+   
+   // Initialize team manager with market regime
+   teamManager.SetMarketRegime(GetPointer(marketRegime));
+   teamManager.SetRegimeMultipliers();
+   
+   // Initialize strategies
+   scalp1.Initialize("Scalp1", MAGIC_SCALP1, StrategyWeight_Scalp1, GetPointer(marketRegime));
+   scalp2.Initialize("Scalp2", MAGIC_SCALP2, StrategyWeight_Scalp2, GetPointer(marketRegime));
+   trend.Initialize("Trend", MAGIC_TREND, StrategyWeight_Trend, GetPointer(marketRegime));
+   breakout.Initialize("Breakout", MAGIC_BREAKOUT, StrategyWeight_Breakout, GetPointer(marketRegime));
+   
+   // Register strategies with team manager
+   teamManager.RegisterStrategy(0, GetPointer(scalp1));
+   teamManager.RegisterStrategy(1, GetPointer(scalp2));
+   teamManager.RegisterStrategy(2, GetPointer(trend));
+   teamManager.RegisterStrategy(3, GetPointer(breakout));
+   
+   // Initialize recovery systems
+   ArrayInitialize(recoverySets, RecoverySet());
+   ArrayInitialize(orphanJobs, COrphanJob());
+   
+   // Set timer for regular updates
+   EventSetTimer(1);
+   
+   Print("Never Give Up EA Pro Initialized");
+   Print("Market Regime: ", marketRegime.GetRegimeString());
+   
+   
+    // สร้าง objects ด้วย new
+    marketRegime = new CMarketRegime(_Symbol, PERIOD_H1);
+    teamManager = new CTeamManager();  // ← ใช้ CTeamManager
+    positionManager = new CPositionManager();
+    
+    // สร้าง strategies ด้วย new
+    scalp1 = new CScalp1Enhanced();
+    scalp2 = new CScalp2Enhanced();
+    trend = new CTrendEnhanced();
+    breakout = new CBreakout();
+    
+    // Initialize market regime
+    if(marketRegime != NULL)
+    {
+        marketRegime.SetParameters(14, 0.002, 14, 25, 20, 2.0, 14, 70, 30);
+    }
+    
+    // Initialize team manager
+    if(teamManager != NULL)
+    {
+        teamManager.SetMarketRegime(marketRegime);
+        teamManager.SetBaseWeights(0.25, 0.25, 0.25, 0.25);
+        
+        // Register strategies
+        teamManager.RegisterStrategy(0, scalp1);
+        teamManager.RegisterStrategy(1, scalp2);
+        teamManager.RegisterStrategy(2, trend);
+        teamManager.RegisterStrategy(3, breakout);
+        
+        teamManager.SetAdaptationSpeed(0.1);
+    }
+    
+    // Initialize strategies
+    if(scalp1 != NULL) scalp1.Initialize(_Symbol, PERIOD_M5, ExpertMagicNumber + 1);
+    if(scalp2 != NULL) scalp2.Initialize(_Symbol, PERIOD_M5, ExpertMagicNumber + 2);
+    if(trend != NULL) trend.Initialize(_Symbol, PERIOD_H1, ExpertMagicNumber + 3);
+    if(breakout != NULL) breakout.Initialize(_Symbol, PERIOD_H1, ExpertMagicNumber + 4);
+    
+    Print("EA Initialized successfully");
+   
+   
+   
+   return(INIT_SUCCEEDED);
+}
+
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+// Delete all objects
+    if(breakout != NULL) delete breakout;
+    if(trend != NULL) delete trend;
+    if(scalp2 != NULL) delete scalp2;
+    if(scalp1 != NULL) delete scalp1;
+    
+    if(positionManager != NULL) delete positionManager;
+    if(teamManager != NULL) delete teamManager;
+    if(marketRegime != NULL) delete marketRegime;
+    
+    Print("EA Deinitialized");
+    
+    EventKillTimer();
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+
+   // อัปเดตสภาพตลาด
+    if(UseRegimeAdjustment)
+        teamManager.UpdateMarketRegime();
+    
+    // อัปเดต strategies
+    UpdateAllStrategies();
+    
+    // รับสัญญาณจากทีม
+    int signalType;
+    double signalStrength;
+    string topStrategy;
+    
+    if(teamManager.GetTeamSignal(signalType, signalStrength, topStrategy))
+    {
+        // ตรวจสอบเงื่อนไขก่อนเปิดออเดอร์
+        if(CheckTradingConditions())
+        {
+            // เปิดออเดอร์ตามสัญญาณ
+            OpenPosition(signalType, signalStrength, topStrategy);
+        }
+    }
+    
+    // จัดการออเดอร์ที่มีอยู่
+    ManageExistingPositions();
+
+   // Update position manager (ตรวจสอบ TP/SL)
+   positionManager.OnTick();
+
+   // Update balance
+   totalBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   
+   // Update market regime analysis
+   if(EnableMarketRegime)
+   {
+      marketRegime.UpdateAnalysis();
+      
+      // Print regime changes
+      if(TimeCurrent() - lastRegimePrint > 300) // Every 5 minutes
+      {
+         Print("Current Market Regime: ", marketRegime.GetRegimeString(),
+               ", Direction: ", marketRegime.GetMarketDirection(),
+               ", Strength: ", DoubleToString(marketRegime.GetTrendStrength() * 100, 1), "%");
+         lastRegimePrint = TimeCurrent();
+      }
+   }
+   
+   // Update adaptive weights
+   if(AdaptiveWeights)
+   {
+      teamManager.UpdateAdaptiveWeights();
+   }
+   
+   // Update team performance
+   teamManager.UpdateStrategyPerformance();
+   
+   // Check for smart close
+   CheckSmartClose();
+   
+   // Check for recovery mode
+   CheckRecoveryMode();
+   
+   // Check for orphan orders
+   if(EnableUniversalOrphan)
+      CheckOrphanOrders();
+   
+   // Execute strategies with market-aware roles
+   ExecuteMarketAwareStrategies();
+   
+   // Manage recovery sets
+   ManageRecoverySets();
+   
+   // Manage orphan jobs
+   ManageOrphanJobs();
+}
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++//
+//+------------------------------------------------------------------+
+//| Calculate portfolio drawdown                                     |
+//+------------------------------------------------------------------+
+double CalculatePortfolioDrawdown()
+{
+    // คำนวณ drawdown จากยอดรวม
+    double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double maxEquity = AccountInfoDouble(ACCOUNT_EQUITY); // ควรเก็บค่า max ไว้
+    
+    if(currentEquity < maxEquity)
+        return ((currentEquity - maxEquity) / maxEquity) * 100;
+    
+    return 0.0;
+}
+void UpdateStrategyPerformance()
+{
+    // ทุกๆ 24 ชั่วโมง ปรับน้ำหนัก strategies
+    static datetime lastUpdate = 0;
+    if(TimeCurrent() - lastUpdate >= 86400)
+    {
+        // คำนวณผลกำไรของแต่ละ strategy จาก comment
+        // แล้วอัปเดตใน teamManager
+        lastUpdate = TimeCurrent();
+    }
+}
+//+------------------------------------------------------------------+
+//| Get team decision for order opening                              |
+//+------------------------------------------------------------------+
+bool GetTeamDecision(int &orderType, double &lotSize, string &strategyName)
+{
+    // หา strategy ที่มี performance ดีที่สุด
+    int bestStrategy = -1;
+    double bestPerformance = -999999.0;
+    
+    for(int i = 0; i < 4; i++)
+    {
+        double performance = teamManager.GetStrategyPerformance(i);
+        ENUM_STRATEGY_ROLE role = teamManager.GetCurrentRole(i);
+        
+        if(role == EA_ROLE_AGGRESSIVE && performance > bestPerformance)
+        {
+            bestPerformance = performance;
+            bestStrategy = i;
+        }
+    }
+    
+    if(bestStrategy != -1)
+    {
+        // ได้ strategy ที่ดีที่สุด
+        CBaseStrategy* strategy = NULL;
+        
+        switch(bestStrategy)
+        {
+            case 0: strategy = GetPointer(scalp1); break;
+            case 1: strategy = GetPointer(scalp2); break;
+            case 2: strategy = GetPointer(trend); break;
+            case 3: strategy = GetPointer(breakout); break;
+        }
+        
+        if(strategy != NULL)
+        {
+            // รับสัญญาณจาก strategy นั้น
+            int signal = strategy.GetSignal();
+            if(signal != 0)
+            {
+                orderType = (signal > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+                lotSize = CalculateLotSize(teamManager.GetAdaptiveWeight(bestStrategy));
+                strategyName = strategy.GetName();
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+void ManageExistingPositions()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol && 
+           PositionGetInteger(POSITION_MAGIC) == ExpertMagicNumber)
+        {
+            // ตรวจสอบและปรับ TP/SL ตาม Market Regime
+            ManagePosition(PositionGetTicket(i));
+        }
+    }
+}
+void ManagePosition(ulong ticket)
+{
+    // รับข้อมูล position
+    if(PositionSelectByTicket(ticket))
+    {
+        double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        double tp = PositionGetDouble(POSITION_TP);
+        double sl = PositionGetDouble(POSITION_SL);
+        
+        // ตรวจสอบ trailing stop หรือ break even ตาม Market Regime
+        // ... (เพิ่มโค้ดจัดการตามต้องการ)
+    }
+}
+bool CheckTradingConditions()
+{
+    // ตรวจสอบ Spread
+    double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+    if(spread > MaxSpread)
+    {
+        Print("Spread too high: ", spread, " (max: ", MaxSpread, ")");
+        return false;
+    }
+    
+    // ตรวจสอบ Market Regime
+    if(UseRegimeAdjustment)
+    {
+        ENUM_MARKET_REGIME regime = teamManager.GetCurrentRegime();
+        
+        // ตัวอย่างเงื่อนไขตามสภาพตลาด
+        switch(regime)
+        {
+            case EA_REGIME_UNCLEAR:
+                Print("Market regime unclear, skipping trade");
+                return false;
+                
+            case EA_REGIME_VOLATILE:
+                // ตรวจสอบเพิ่มเติมสำหรับตลาดผันผวน
+                double atr = marketRegime.GetLastATR();
+                if(atr > 0.005) // ATR สูงเกินไป
+                {
+                    Print("High volatility detected, ATR: ", atr);
+                    return false;
+                }
+                break;
+        }
+    }
+    
+    // ตรวจสอบจำนวนออเดอร์เปิด
+    if(CountOpenPositions() >= 4) // ไม่เกิน 4 ออเดอร์
+        return false;
+    
+    return true;
+}
+
+
+int CountOpenPositions()
+{
+    int count = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetSymbol(i) == _Symbol && 
+           PositionGetInteger(POSITION_MAGIC) == ExpertMagicNumber)
+            count++;
+    }
+    return count;
+}
+
+void UpdateAllStrategies()
+{
+    // อัปเดตแต่ละ strategy
+    scalp1.Update();
+    scalp2.Update();
+    trend.Update();
+    breakout.Update();
+}
+
+void SomeStrategyFunction()
+{
+   // แทนที่จะใช้ trade.PositionOpen() โดยตรง
+   // ใช้ method จาก BaseStrategy ที่รองรับ position manager
+   scalp1.OpenPositionWithTP(ORDER_TYPE_BUY, 0.01, "Signal");
+   
+   // หรือถ้าต้องการจัดการเอง:
+   /*
+   if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, 0.01, price, 0, 0, comment))
+   {
+      ulong ticket = trade.ResultOrder();
+      positionManager.ManageNewPosition(ticket, ORDER_TYPE_BUY, price, 
+                                        0.01, _Symbol, "StrategyName");
+   }
+   */
+}
+// เมื่อเปิดออเดอร์ใหม่ในแต่ละ strategy
+void OpenPositionWithManagement(ENUM_ORDER_TYPE type, double lot, 
+                               string strategyName, string comment = "")
+{
+   // เปิดออเดอร์ปกติ
+   if(trade.PositionOpen(_Symbol, type, lot, price, 0, 0, comment))
+   {
+      ulong ticket = trade.ResultOrder();
+      
+      // ส่งให้ Position Manager จัดการ
+      positionManager.ManageNewPosition(ticket, type, price, lot, 
+                                        _Symbol, strategyName);
+   }
+}
+//+------------------------------------------------------------------+
+//| Execute strategies with market awareness                         |
+//+------------------------------------------------------------------+
+void ExecuteMarketAwareStrategies()
+{
+   double portfolioDrawdown = portfolio.GetTotalProfit();
+   ENUM_MARKET_DIRECTION marketDir = marketRegime.GetMarketDirection();
+   
+   // Get current regime
+   ENUM_MARKET_REGIME regime = marketRegime.GetCurrentRegime();
+   bool regimeConfirmed = marketRegime.IsConfirmed();
+   
+   // Execute each strategy with market-aware role
+   for(int i = 0; i < 4; i++)
+   {
+      ENUM_STRATEGY_ROLE role = teamManager.GetStrategyRole(i, portfolioDrawdown);
+      
+      // Additional market-aware adjustments
+      if(regimeConfirmed)
+      {
+         // In strong trend, adjust roles
+         if(marketRegime.GetTrendStrength() > 0.7)
+         {
+            string strategyName = GetStrategyName(i);
+            
+            // In strong uptrend, trend and breakout strategies lead
+            if(marketDir == DIRECTION_BULLISH)
+            {
+               if(strategyName == "Trend" || strategyName == "Breakout")
+                  role = ROLE_AGGRESSIVE;
+               else
+                  role = ROLE_SUPPORT;
+            }
+            // In strong downtrend, trend strategies lead
+            else if(marketDir == DIRECTION_BEARISH)
+            {
+               if(strategyName == "Trend")
+                  role = ROLE_AGGRESSIVE;
+               else if(strategyName == "Breakout")
+                  role = ROLE_SUPPORT;
+               else
+                  role = ROLE_DEFENSIVE;
+            }
+         }
+         
+        // In ranging market, scalping strategies lead
+        if(regime == REGIME_RANGING)
+        {
+           string strategyName = GetStrategyName(i);
+           
+           if(strategyName == "Scalp1" || strategyName == "Scalp2")
+              role = ROLE_AGGRESSIVE;
+           else if(strategyName == "Breakout")
+              role = ROLE_DEFENSIVE; // Wait for breakout
+        }
+      }
+      
+      // Execute strategy with final role
+      ExecuteStrategyByIndex(i, role, portfolioDrawdown);
+   }
+   
+   // Print team status periodically
+   static datetime lastTeamPrint = 0;
+   if(TimeCurrent() - lastTeamPrint > 600) // Every 10 minutes
+   {
+      PrintTeamStatus();
+      if(AdaptiveWeights) teamManager.PrintWeights();
+      lastTeamPrint = TimeCurrent();
+   }
+}
+//+------------------------------------------------------------------+
+//| Execute specific strategy                                         |
+//+------------------------------------------------------------------+
+void ExecuteStrategyByIndex(int index, ENUM_STRATEGY_ROLE role, double portfolioDrawdown)
+{
+   switch(index)
+   {
+      case 0: // Scalp1
+         scalp1.Execute(role, portfolioDrawdown);
+         break;
+         
+      case 1: // Scalp2
+         scalp2.Execute(role, portfolioDrawdown);
+         break;
+         
+      case 2: // Trend
+         trend.Execute(role, portfolioDrawdown);
+         break;
+         
+      case 3: // Breakout
+         breakout.Execute(role, portfolioDrawdown);
+         break;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Get strategy name by index                                       |
+//+------------------------------------------------------------------+
+string GetStrategyName(int index)
+{
+   switch(index)
+   {
+      case 0: return "Scalp1";
+      case 1: return "Scalp2";
+      case 2: return "Trend";
+      case 3: return "Breakout";
+   }
+   return "";
+}
+
+//+------------------------------------------------------------------+
+//| Print team status                                                |
+//+------------------------------------------------------------------+
+void PrintTeamStatus()
+{
+   string status = "Team Status: ";
+   status += StringFormat("Recovery Mode: %s, ", isRecoveryMode ? "ON" : "OFF");
+   status += StringFormat("Market Regime: %s, ", marketRegime.GetRegimeString());
+   status += StringFormat("P/L: %.2f", portfolio.GetTotalProfit());
+   
+   Print(status);
+   
+   // Print individual strategy performance
+   for(int i = 0; i < 4; i++)
+   {
+      string name = GetStrategyName(i);
+      double perf = teamManager.GetStrategyPerformance(i);
+      double weight = teamManager.GetAdaptiveWeight(i) * 100;
+      
+      Print(StringFormat("%s: P/L=%.2f, Weight=%.1f%%", name, perf, weight));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Enhanced recovery logic with market direction                    |
+//+------------------------------------------------------------------+
+void OpenRecoveryOrderEnhanced(ulong originalMagic, double lot, string reason)
+{
+   // Find the latest losing set for this magic
+   RecoverySet* targetSet = NULL;
+   for(int i = setCount-1; i >= 0; i--)
+   {
+      if(recoverySets[i].magicNumber == originalMagic + 10000 && 
+         recoverySets[i].CalculateSetProfit() < 0)
+      {
+         targetSet = &recoverySets[i];
+         break;
+      }
+   }
+   
+   if(targetSet == NULL) return;
+   
+   // Get main position direction
+   if(PositionSelectByTicket(targetSet->mainTicket))
+   {
+      ENUM_POSITION_TYPE mainType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      
+      // Check market direction for intelligent recovery
+      ENUM_MARKET_DIRECTION marketDir = marketRegime.GetMarketDirection();
+      double trendStr = marketRegime.GetTrendStrength();
+      
+      ENUM_ORDER_TYPE recoveryType;
+      
+      // Intelligent recovery decision
+      if(trendStr > 0.6) // Strong trend
+      {
+         // In strong trend, consider trading with trend
+         if(marketDir == DIRECTION_BULLISH && mainType == POSITION_TYPE_SELL)
+         {
+            // Our sell is against strong uptrend - consider buying instead
+            recoveryType = ORDER_TYPE_BUY;
+            reason += "-WithTrend";
+         }
+         else if(marketDir == DIRECTION_BEARISH && mainType == POSITION_TYPE_BUY)
+         {
+            // Our buy is against strong downtrend - consider selling instead
+            recoveryType = ORDER_TYPE_SELL;
+            reason += "-WithTrend";
+         }
+         else
+         {
+            // Trade against position (traditional recovery)
+            recoveryType = (mainType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+            reason += "-Counter";
+         }
+      }
+      else
+      {
+         // Normal market - traditional counter-trade recovery
+         recoveryType = (mainType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      }
+      
+      // Adjust lot size based on market conditions
+      double adjustedLot = lot;
+      if(marketRegime.GetRegimeString() == "VOLATILE")
+         adjustedLot *= 0.7; // Reduce size in high volatility
+      
+      // Execute recovery order
+      double price = (recoveryType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) 
+                                                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+      string comment = StringFormat("Recovery-%s-%d-%d", reason, targetSet->setNumber, 
+                                   targetSet->subCount+1);
+      
+      if(trade.PositionOpen(_Symbol, recoveryType, adjustedLot, price, 0, 0, comment))
+      {
+         ulong ticket = trade.ResultOrder();
+         targetSet->AddSubTicket(ticket);
+         
+         Print("Opened Intelligent Recovery: ", EnumToString(recoveryType),
+               " for Set #", targetSet->setNumber,
+               " (Market: ", marketRegime.GetRegimeString(), ")");
+      }
+   }
+}
+//+------------------------------------------------------------------+
+//| Timer function                                                   |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   // Periodic checks every second
+   CheckSetCompletion();
+   CheckJobCompletion();
+}
+
+//+------------------------------------------------------------------+
+//| Check and switch recovery mode                                   |
+//+------------------------------------------------------------------+
+void CheckRecoveryMode()
+{
+   double currentProfit = portfolio.GetTotalProfit();
+   
+   if(!isRecoveryMode && currentProfit <= Recovery_StartLevel)
+   {
+      isRecoveryMode = true;
+      Print("Switching to RECOVERY MODE. Current P/L: ", currentProfit);
+   }
+   else if(isRecoveryMode && currentProfit >= Recovery_StopLevel)
+   {
+      isRecoveryMode = false;
+      Print("Switching to NORMAL MODE. Current P/L: ", currentProfit);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check for orphan orders                                          |
+//+------------------------------------------------------------------+
+void CheckOrphanOrders()
+{
+   // Check all positions for main tickets without recovery sets
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      ulong magic = PositionGetInteger(POSITION_MAGIC);
+      
+      // Check if this is a main ticket (not recovery/orphan)
+      if(magic >= 10000 && magic < 20000)
+      {
+         // Look for corresponding recovery set
+         bool found = false;
+         for(int j = 0; j < setCount; j++)
+         {
+            if(recoverySets[j].mainTicket == ticket)
+            {
+               found = true;
+               break;
+            }
+         }
+         
+         // If no recovery set found, create orphan job
+         if(!found)
+         {
+            CreateOrphanJob(ticket, magic);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Create orphan job                                                |
+//+------------------------------------------------------------------+
+void CreateOrphanJob(ulong mainTicket, ulong originalMagic)
+{
+   if(jobCount >= 20) return;
+   
+   COrphanJob job;
+   job.Initialize(jobCount+1, mainTicket, OrphanCloseProfit, 
+                  MAGIC_ORPHAN + jobCount, "XAU");
+   
+   // Add the main ticket as first orphan
+   job.AddOrphanTicket(mainTicket);
+   
+   // Find and add related recovery tickets
+   string comment = PositionGetString(POSITION_COMMENT);
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      
+      string posComment = PositionGetString(POSITION_COMMENT);
+      if(StringFind(posComment, comment) != -1)
+      {
+         ulong posTicket = PositionGetInteger(POSITION_TICKET);
+         if(posTicket != mainTicket)
+         {
+            job.AddOrphanTicket(posTicket);
+         }
+      }
+   }
+   
+   orphanJobs[jobCount] = job;
+   jobCount++;
+   
+   Print("Created Orphan Job #", job.GetJobId(), " for ticket ", mainTicket);
+}
+
+//+------------------------------------------------------------------+
+//| Execute strategies based on mode                                 |
+//+------------------------------------------------------------------+
+void ExecuteStrategies()
+{
+   double portfolioDrawdown = portfolio.GetTotalProfit();
+   
+   // Get strategy role
+   int leader = team.GetRecoveryLeader();
+   
+   for(int i = 0; i < 4; i++)
+   {
+      ENUM_STRATEGY_ROLE role = team.GetStrategyRole(i, portfolioDrawdown);
+      
+      switch(i)
+      {
+         case 0: // Scalp1
+            if(role == ROLE_AGGRESSIVE || (isRecoveryMode && i == leader))
+               ExecuteScalp1Strategy(MAGIC_SCALP1, role);
+            break;
+            
+         case 1: // Scalp2
+            if(role == ROLE_AGGRESSIVE || (isRecoveryMode && i == leader))
+               ExecuteScalp2Strategy(MAGIC_SCALP2, role);
+            break;
+            
+         case 2: // Trend
+            if(role == ROLE_AGGRESSIVE || (isRecoveryMode && i == leader))
+               ExecuteTrendStrategy(MAGIC_TREND, role);
+            break;
+            
+         case 3: // Breakout
+            if(role == ROLE_AGGRESSIVE || (isRecoveryMode && i == leader))
+               ExecuteBreakoutStrategy(MAGIC_BREAKOUT, role);
+            break;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Example: Scalp1 Strategy                                         |
+//+------------------------------------------------------------------+
+void ExecuteScalp1Strategy(ulong magic, ENUM_STRATEGY_ROLE role)
+{
+   // Get market conditions
+   double rsi = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE, 0);
+   double atr = iATR(_Symbol, PERIOD_M5, 14, 0);
+   
+   // Calculate lot size based on role
+   double lotSize = CalculateLotSize(role);
+   
+   // Entry logic
+   if(rsi < 30 && role == ROLE_AGGRESSIVE) // Oversold bounce
+   {
+      OpenPosition(ORDER_TYPE_BUY, lotSize, magic, "Scalp1-Bounce");
+   }
+   else if(rsi > 70 && role == ROLE_AGGRESSIVE) // Overbought bounce
+   {
+      OpenPosition(ORDER_TYPE_SELL, lotSize, magic, "Scalp1-Bounce");
+   }
+   else if(isRecoveryMode && role == ROLE_SUPPORT)
+   {
+      // Support role: open smaller recovery orders
+      OpenRecoveryOrder(magic, lotSize * 0.5, "Scalp1-Recovery");
+   }
+}
+void CalculateRiskParameters(double &tpPoints, double &slPoints, string strategyName)
+{
+    double baseTP = 50.0;
+    double baseRR = 1.5;
+    
+    ENUM_MARKET_REGIME regime = teamManager.GetCurrentRegime();
+    
+    // Base TP/SL ตาม regime
+    switch(regime)
+    {
+        case EA_REGIME_TREND_UP:
+        case EA_REGIME_TREND_DOWN:
+            tpPoints = baseTP * 1.5;
+            break;
+        case EA_REGIME_RANGING:
+            tpPoints = baseTP * 0.7;
+            break;
+        case EA_REGIME_BREAKOUT_UP:
+        case EA_REGIME_BREAKOUT_DOWN:
+            tpPoints = baseTP * 2.0;
+            break;
+        case EA_REGIME_VOLATILE:
+            tpPoints = baseTP * 0.5;
+            break;
+        default:
+            tpPoints = baseTP;
+            break;
+    }
+    
+    // ปรับตาม strategy
+    if(strategyName == "Scalp1Enhanced" || strategyName == "Scalp2Enhanced")
+        tpPoints *= 0.7; // TP สั้นสำหรับ Scalp
+    else if(strategyName == "TrendEnhanced")
+        tpPoints *= 1.3; // TP ไกลสำหรับ Trend
+    
+    slPoints = tpPoints / baseRR;
+}
+
+
+//+------------------------------------------------------------------+
+//| Open new position with recovery set creation                     |
+//+------------------------------------------------------------------+
+void OpenPosition(int signalType, double signalStrength, string strategyName)
+{
+    // คำนวณ Lot Size
+    double lotSize = CalculateLotSize(signalStrength, strategyName);
+    
+    // กำหนด TP/SL
+    double tpPoints, slPoints;
+    CalculateRiskParameters(tpPoints, slPoints, strategyName);
+    
+    // เปิดออเดอร์
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lotSize;
+    request.type = (signalType == OP_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    request.price = (signalType == OP_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) 
+                                           : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // ตั้งค่า TP/SL
+    if(tpPoints > 0)
+    {
+        request.tp = (signalType == OP_BUY) ? request.price + tpPoints * _Point
+                                            : request.price - tpPoints * _Point;
+    }
+    
+    if(slPoints > 0)
+    {
+        request.sl = (signalType == OP_BUY) ? request.price - slPoints * _Point
+                                            : request.price + slPoints * _Point;
+    }
+    
+    request.deviation = 10;
+    request.magic = ExpertMagicNumber;
+    request.comment = StringFormat("Team: %s | Regime: %s | Strength: %.2f", 
+                                   strategyName, 
+                                   EnumToString(teamManager.GetCurrentRegime()),
+                                   signalStrength);
+    
+    if(OrderSend(request, result))
+    {
+        Print("Order opened: ", EnumToString((ENUM_ORDER_TYPE)signalType),
+              ", Lot: ", lotSize, ", Strategy: ", strategyName,
+              ", Regime: ", EnumToString(teamManager.GetCurrentRegime()));
+    }
+    else
+    {
+        Print("Order failed: ", GetLastError());
+    }
+}
+
+
+//+------------------------------------------------------------------+
+//| Open recovery order                                              |
+//+------------------------------------------------------------------+
+void OpenRecoveryOrder(ulong originalMagic, double lot, string reason)
+{
+   // Find the latest losing set for this magic
+   RecoverySet* targetSet = NULL;
+   for(int i = setCount-1; i >= 0; i--)
+   {
+      if(recoverySets[i].magicNumber == originalMagic + 10000 && 
+         recoverySets[i].CalculateSetProfit() < 0)
+      {
+         targetSet = &recoverySets[i];
+         break;
+      }
+   }
+   
+   if(targetSet == NULL) return;
+   
+   // Determine direction opposite to main position
+   if(PositionSelectByTicket(targetSet->mainTicket))
+   {
+      ENUM_POSITION_TYPE mainType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      ENUM_ORDER_TYPE recoveryType = (mainType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      
+      double price = (recoveryType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) 
+                                                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+      string comment = StringFormat("Recovery-%d-%d", targetSet->setNumber, 
+                                   targetSet->subCount+1);
+      
+      if(trade.PositionOpen(_Symbol, recoveryType, lot, price, 0, 0, comment))
+      {
+         ulong ticket = trade.ResultOrder();
+         targetSet->AddSubTicket(ticket);
+         
+         Print("Opened Recovery order for Set #", targetSet->setNumber, 
+               " Ticket: ", ticket);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size based on role and conditions                  |
+//+------------------------------------------------------------------+
+double CalculateLotSize(double signalStrength, string strategyName)
+{
+    double baseLot = 0.01;
+    
+    // ปรับตาม Signal Strength
+    if(signalStrength > 0.8)
+        baseLot *= 2.0;
+    else if(signalStrength > 0.6)
+        baseLot *= 1.5;
+    else if(signalStrength > 0.4)
+        baseLot *= 1.2;
+    else if(signalStrength < 0.2)
+        baseLot *= 0.5;
+    
+    // ปรับตาม Market Regime
+    ENUM_MARKET_REGIME regime = teamManager.GetCurrentRegime();
+    switch(regime)
+    {
+        case EA_REGIME_VOLATILE:
+            baseLot *= 0.5;
+            break;
+        case EA_REGIME_TREND_UP:
+        case EA_REGIME_TREND_DOWN:
+            baseLot *= 1.3;
+            break;
+        case EA_REGIME_BREAKOUT_UP:
+        case EA_REGIME_BREAKOUT_DOWN:
+            baseLot *= 1.5;
+            break;
+    }
+    
+    // ปรับตาม strategy type
+    if(strategyName == "TrendEnhanced" || strategyName == "Breakout")
+        baseLot *= 1.2;
+    else if(strategyName == "Scalp1Enhanced" || strategyName == "Scalp2Enhanced")
+        baseLot *= 0.8;
+    
+    // Normalize lot size
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    
+    baseLot = MathMax(minLot, MathMin(maxLot, baseLot));
+    baseLot = MathRound(baseLot / stepLot) * stepLot;
+    
+    return NormalizeDouble(baseLot, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check for smart close conditions                                 |
+//+------------------------------------------------------------------+
+void CheckSmartClose()
+{
+   if(portfolio.ShouldSmartClose())
+   {
+      Print("SMART CLOSE TRIGGERED! Closing all positions.");
+      
+      // Close all positions
+      CloseAllPositions();
+      
+      // Reset recovery sets
+      ArrayInitialize(recoverySets, RecoverySet());
+      setCount = 0;
+      
+      // Reset orphan jobs
+      ArrayInitialize(orphanJobs, COrphanJob());
+      jobCount = 0;
+      
+      // Reset modes
+      isRecoveryMode = false;
+      
+      Print("System reset. Ready for new mission.");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close all positions                                              |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+{
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) == _Symbol)
+      {
+         ulong ticket = PositionGetInteger(POSITION_TICKET);
+         CTrade closeTrade;
+         closeTrade.PositionClose(ticket);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Manage recovery sets                                             |
+//+------------------------------------------------------------------+
+void ManageRecoverySets()
+{
+   for(int i = 0; i < setCount; i++)
+   {
+      // Check if set should be closed
+      if(recoverySets[i].ShouldCloseSet(OrphanCloseProfit))
+      {
+         Print("Closing Recovery Set #", recoverySets[i].setNumber, 
+               " - Target reached.");
+         recoverySets[i].CloseAllTickets();
+         
+         // Remove from array
+         RemoveRecoverySet(i);
+         i--; // Adjust index after removal
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Manage orphan jobs                                               |
+//+------------------------------------------------------------------+
+void ManageOrphanJobs()
+{
+   for(int i = 0; i < jobCount; i++)
+   {
+      // Check if job should be closed
+      if(orphanJobs[i].ShouldCloseJob())
+      {
+         Print("Closing Orphan Job #", orphanJobs[i].GetJobId(), 
+               " - Target reached.");
+         orphanJobs[i].CloseAllTickets();
+         
+         // Remove from array
+         RemoveOrphanJob(i);
+         i--; // Adjust index after removal
+      }
+      // Check if job expired
+      else if(orphanJobs[i].HasExpired())
+      {
+         Print("Orphan Job #", orphanJobs[i].GetJobId(), " expired.");
+         orphanJobs[i].CloseAllTickets();
+         
+         // Remove from array
+         RemoveOrphanJob(i);
+         i--; // Adjust index after removal
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Remove recovery set from array                                   |
+//+------------------------------------------------------------------+
+void RemoveRecoverySet(int index)
+{
+   if(index < 0 || index >= setCount) return;
+   
+   for(int i = index; i < setCount-1; i++)
+   {
+      recoverySets[i] = recoverySets[i+1];
+   }
+   setCount--;
+}
+
+//+------------------------------------------------------------------+
+//| Remove orphan job from array                                     |
+//+------------------------------------------------------------------+
+void RemoveOrphanJob(int index)
+{
+   if(index < 0 || index >= jobCount) return;
+   
+   for(int i = index; i < jobCount-1; i++)
+   {
+      orphanJobs[i] = orphanJobs[i+1];
+   }
+   jobCount--;
+}
+
+//+------------------------------------------------------------------+
+//| Update team status                                               |
+//+------------------------------------------------------------------+
+void UpdateTeamStatus()
+{
+   for(int i = 0; i < 4; i++)
+   {
+      ulong magic = 0;
+      switch(i)
+      {
+         case 0: magic = MAGIC_SCALP1; break;
+         case 1: magic = MAGIC_SCALP2; break;
+         case 2: magic = MAGIC_TREND; break;
+         case 3: magic = MAGIC_BREAKOUT; break;
+      }
+      
+      double profit = CalculateStrategyProfit(magic);
+      int positions = CountStrategyPositions(magic);
+      
+      team.UpdateTeamPerformance(i, profit, positions);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate strategy profit                                        |
+//+------------------------------------------------------------------+
+double CalculateStrategyProfit(ulong magic)
+{
+   double totalProfit = 0;
+   
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      
+      ulong posMagic = PositionGetInteger(POSITION_MAGIC);
+      if(posMagic == magic || 
+         (posMagic >= magic + 10000 && posMagic < magic + 20000))
+      {
+         totalProfit += PositionGetDouble(POSITION_PROFIT);
+      }
+   }
+   
+   return totalProfit;
+}
+
+//+------------------------------------------------------------------+
+//| Count strategy positions                                         |
+//+------------------------------------------------------------------+
+int CountStrategyPositions(ulong magic)
+{
+   int count = 0;
+   
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      
+      ulong posMagic = PositionGetInteger(POSITION_MAGIC);
+      if(posMagic == magic || 
+         (posMagic >= magic + 10000 && posMagic < magic + 20000))
+      {
+         count++;
+      }
+   }
+   
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Check set completion                                             |
+//+------------------------------------------------------------------+
+void CheckSetCompletion()
+{
+   // Periodic check for completed sets
+   // (Called by timer)
+}
+
+//+------------------------------------------------------------------+
+//| Check job completion                                             |
+//+------------------------------------------------------------------+
+void CheckJobCompletion()
+{
+   // Periodic check for completed jobs
+   // (Called by timer)
+}
