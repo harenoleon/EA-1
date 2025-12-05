@@ -1,6 +1,4 @@
-สร้าง EA
-
-ด้านล่างนี้คือ **Prompt สำหรับ DeepSeek AI หรือ Developer** ที่ออกแบบมาเฉพาะเพื่อสร้าง **EA ระบบเทรดที่ไม่ยอมแพ้** โดยเน้นการทำงานเป็นทีม ปิดออเดอร์แบบ array (set/pair) และมีระบบจัดการออเดอร์กำพร้า (Orphan) อย่างสมบูรณ์ — **ไม่หยุดเทรดจนกว่าจะชนะ** ✅
+ **Prompt สำหรับ DeepSeek AI หรือ Developer** ที่ออกแบบมาเฉพาะเพื่อสร้าง **EA ระบบเทรดที่ไม่ยอมแพ้** โดยเน้นการทำงานเป็นทีม ปิดออเดอร์แบบ array (set/pair) และมีระบบจัดการออเดอร์กำพร้า (Orphan) อย่างสมบูรณ์ — **ไม่หยุดเทรดจนกว่าจะชนะ** ✅
 
 ---
 
@@ -100,8 +98,26 @@ input double StrategyWeight_Trend    = 0.15;
 
 ---
 
-คุณสามารถใช้ Prompt นี้กับ:
-- **DeepSeek AI** → เพื่อ generate โค้ด MQL5 ที่สมบูรณ์
-- **Developer** → เพื่อใช้เป็นเอกสาร spec ในการพัฒนา
 
-หากต้องการให้ช่วยสร้างโค้ดบางส่วน (เช่น `RecoverySet`, `OrphanJob`) หรือปรับแต่งเพิ่มเติม ก็บอกได้เลยครับ! 😊
+NeverGiveUpEA_Pro/
+├── Include/
+│   ├── Core/
+│   │   ├── RecoverySet.mqh
+│   │   ├── OrphanJob.mqh
+│   │   ├── TeamManager.mqh
+│   │   ├── PortfolioManager.mqh
+│   │   ├── CommonEnums.mqh          
+│   │   ├── MarketRegime.mqh
+│   │   └── **ProfitUniversal.mqh**     
+│   ├── Strategies/
+│   │   ├── BaseStrategy.mqh
+│   │   ├── Scalp1.mqh ยังไม่มี
+│   │   ├── Scalp2.mqh ยังไม่มี
+│   │   ├── TrendEnhanced.mqh 
+│   │   └── Breakout.mqh 
+│   └── **Managers/**
+│       ├── **PositionManager.mqh**     
+│       └── **RiskManager.mqh**         
+├── NeverGiveUpEA_Pro.mq5
+└── NeverGiveUpEA_Pro.set
+
