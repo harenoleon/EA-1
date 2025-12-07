@@ -12,31 +12,204 @@
 class CMarketRegime
 {
 private:
-   ENUM_MARKET_REGIME currentRegime;
-   ENUM_MARKET_DIRECTION currentDirection;
-   double               trendStrength;
-   double               volatilityIndex;
-   double               adxValue;
-   double               atrValue;
-   double               maFast;
-   double               maMedium;
-   double               maSlow;
-   datetime             lastUpdate;
-   bool                 isConfirmed;
-   
-   // Trend detection buffers
-   double               trendScores[3];  // Up, Down, Ranging
-   
+    string symbol;
+    ENUM_TIMEFRAMES timeframe;
+    
+    // Parameters
+    int atrPeriod;
+    double atrThreshold;
+    int adxPeriod;
+    int adxThreshold;
+    int bbPeriod;
+    double bbDeviation;
+    int rsiPeriod;
+    int rsiOverbought;
+    int rsiOversold;
+    
+    // Current values
+    ENUM_MARKET_REGIME lastRegime;
+    ENUM_MARKET_DIRECTION lastDirection;
+    datetime lastUpdate;
+    
+    // Indicator values
+    double lastAtr;
+    double lastADX;
+    double lastUpperBand;
+    double lastLowerBand;
+    double lastMiddleBand;
+    double lastRSI;
+    double trendStrength;
+    
 public:
-   CMarketRegime() : currentRegime(EA_REGIME_UNCLEAR),  // ← ใช้ EA_ prefix
-                     currentDirection(EA_DIRECTION_NEUTRAL), // ← ใช้ EA_ prefix
-                     trendStrength(0), 
-                     volatilityIndex(0),
-                     lastUpdate(0), 
-                     isConfirmed(false)
-   {
-      ArrayInitialize(trendScores, 0);
-   }
+    CMarketRegime(string sym = NULL, ENUM_TIMEFRAMES tf = PERIOD_H1) :
+        symbol(sym == NULL ? _Symbol : sym),
+        timeframe(tf),
+        lastRegime(EA_REGIME_UNCLEAR),
+        lastDirection(EA_DIRECTION_NEUTRAL),
+        lastUpdate(0),
+        atrPeriod(14),
+        atrThreshold(0.002),
+        adxPeriod(14),
+        adxThreshold(25),
+        bbPeriod(20),
+        bbDeviation(2.0),
+        rsiPeriod(14),
+        rsiOverbought(70),
+        rsiOversold(30),
+        trendStrength(0.0)
+    {
+        if(symbol == NULL) symbol = _Symbol;
+    }
+    
+    // ตรวจสอบสภาพตลาด (สำหรับเรียกจากภายนอก)
+    ENUM_MARKET_REGIME CheckRegime()
+    {
+        // Update ทุกครั้งที่เรียก
+        UpdateIndicators();
+        return lastRegime;
+    }
+    
+    // สำหรับ TeamManagerEnhanced (compatibility)
+    ENUM_MARKET_REGIME GetCurrentRegime()
+    {
+        return CheckRegime();
+    }
+    
+    // อัปเดตตัวชี้วัดทั้งหมด
+    void UpdateIndicators()
+    {
+        // ตรวจสอบว่าเป็น bar ใหม่หรือยัง
+        if(!IsNewBar())
+            return;
+        
+        double atrValue = iATR(symbol, timeframe, atrPeriod, 1);
+        double adxValue = iADX(symbol, timeframe, adxPeriod, PRICE_CLOSE, MODE_MAIN, 1);
+        double plusDI = iADX(symbol, timeframe, adxPeriod, PRICE_CLOSE, MODE_PLUSDI, 1);
+        double minusDI = iADX(symbol, timeframe, adxPeriod, PRICE_CLOSE, MODE_MINUSDI, 1);
+        double rsiValue = iRSI(symbol, timeframe, rsiPeriod, PRICE_CLOSE, 1);
+        
+        // Bollinger Bands
+        double upperBand = iBands(symbol, timeframe, bbPeriod, bbDeviation, 0, PRICE_CLOSE, MODE_UPPER, 1);
+        double lowerBand = iBands(symbol, timeframe, bbPeriod, bbDeviation, 0, PRICE_CLOSE, MODE_LOWER, 1);
+        double middleBand = iBands(symbol, timeframe, bbPeriod, bbDeviation, 0, PRICE_CLOSE, MODE_MAIN, 1);
+        double currentPrice = SymbolInfoDouble(symbol, SYMBOL_BID);
+        
+        // คำนวณความกว้างของ BB
+        double bbWidth = (upperBand - lowerBand) / middleBand;
+        double bbWidthPercent = bbWidth * 100;
+        
+        // บันทึกค่าล่าสุด
+        lastAtr = atrValue;
+        lastADX = adxValue;
+        lastUpperBand = upperBand;
+        lastLowerBand = lowerBand;
+        lastMiddleBand = middleBand;
+        lastRSI = rsiValue;
+        
+        // คำนวณ trend strength
+        trendStrength = adxValue / 100.0;
+        if(plusDI > minusDI)
+            trendStrength = MathAbs(trendStrength);
+        else
+            trendStrength = -MathAbs(trendStrength);
+        
+        // 1. ตรวจสอบ Breakout
+        if(currentPrice > upperBand)
+        {
+            if(adxValue > adxThreshold && plusDI > minusDI)
+                lastRegime = EA_REGIME_BREAKOUT_UP;
+            else if(currentPrice < lowerBand && adxValue > adxThreshold && minusDI > plusDI)
+                lastRegime = EA_REGIME_BREAKOUT_DOWN;
+        }
+        
+        // 2. ตรวจสอบ Trend
+        else if(adxValue > adxThreshold)
+        {
+            if(plusDI > minusDI && rsiValue > 50)
+                lastRegime = EA_REGIME_TREND_UP;
+            else if(minusDI > plusDI && rsiValue < 50)
+                lastRegime = EA_REGIME_TREND_DOWN;
+        }
+        
+        // 3. ตรวจสอบ Volatility
+        else if(bbWidthPercent > 2.0 && atrValue > atrThreshold * 1.5)
+            lastRegime = EA_REGIME_VOLATILE;
+        
+        // 4. ตรวจสอบ Ranging
+        else if(bbWidthPercent < 1.0 && adxValue < 20)
+            lastRegime = EA_REGIME_RANGING;
+        
+        else
+            lastRegime = EA_REGIME_UNCLEAR;
+        
+        // คำนวณทิศทาง
+        double maFast = iMA(symbol, timeframe, 20, 0, MODE_SMA, PRICE_CLOSE, 1);
+        double maSlow = iMA(symbol, timeframe, 50, 0, MODE_SMA, PRICE_CLOSE, 1);
+        
+        if(maFast > maSlow && rsiValue > 50)
+            lastDirection = EA_DIRECTION_BULLISH;
+        else if(maFast < maSlow && rsiValue < 50)
+            lastDirection = EA_DIRECTION_BEARISH;
+        else
+            lastDirection = EA_DIRECTION_NEUTRAL;
+        
+        lastUpdate = TimeCurrent();
+    }
+    
+    // ตรวจสอบว่าเป็น bar ใหม่หรือไม่
+    bool IsNewBar()
+    {
+        static datetime lastBarTime = 0;
+        datetime currentBarTime = iTime(symbol, timeframe, 0);
+        
+        if(lastBarTime != currentBarTime)
+        {
+            lastBarTime = currentBarTime;
+            return true;
+        }
+        return false;
+    }
+    
+    // Get methods (compatibility)
+    ENUM_MARKET_DIRECTION GetMarketDirection() { return lastDirection; }
+    double GetLastATR() { return lastAtr; }
+    double GetLastADX() { return lastADX; }
+    double GetLastUpperBB() { return lastUpperBand; }
+    double GetLastLowerBB() { return lastLowerBand; }
+    double GetLastMiddleBB() { return lastMiddleBand; }
+    double GetLastRSI() { return lastRSI; }
+    double GetTrendStrength() { return trendStrength; }
+    
+    // รับค่าตัวชี้วัดทั้งหมด
+    void GetIndicators(double &atr, double &adx, double &rsi, 
+                       double &upperBB, double &lowerBB, double &middleBB)
+    {
+        atr = lastAtr;
+        adx = lastADX;
+        rsi = lastRSI;
+        upperBB = lastUpperBand;
+        lowerBB = lastLowerBand;
+        middleBB = lastMiddleBand;
+    }
+    
+    // ปรับพารามิเตอร์
+    void SetParameters(int atrPer = 14, double atrThresh = 0.002, 
+                       int adxPer = 14, int adxThresh = 25,
+                       int bbPer = 20, double bbDev = 2.0,
+                       int rsiPer = 14, int rsiOB = 70, int rsiOS = 30)
+    {
+        atrPeriod = atrPer;
+        atrThreshold = atrThresh;
+        adxPeriod = adxPer;
+        adxThreshold = adxThresh;
+        bbPeriod = bbPer;
+        bbDeviation = bbDev;
+        rsiPeriod = rsiPer;
+        rsiOverbought = rsiOB;
+        rsiOversold = rsiOS;
+    }
+};
+
    
    //+------------------------------------------------------------------+
    //| Update market analysis                                           |
@@ -568,32 +741,32 @@ public:
    //+------------------------------------------------------------------+
    //| Get current regime                                               |
    //+------------------------------------------------------------------+
-   ENUM_MARKET_REGIME GetCurrentRegime() const { return currentRegime; }
+   ENUM_MARKET_REGIME GetCurrentRegime()  { return currentRegime; }
    
    //+------------------------------------------------------------------+
    //| Get market direction                                             |
    //+------------------------------------------------------------------+
-   ENUM_MARKET_DIRECTION GetMarketDirection() const { return currentDirection; }
+   ENUM_MARKET_DIRECTION GetMarketDirection()  { return currentDirection; }
    
    //+------------------------------------------------------------------+
    //| Get trend strength (0-1)                                         |
    //+------------------------------------------------------------------+
-   double GetTrendStrength() const { return trendStrength; }
+   double GetTrendStrength()  { return trendStrength; }
    
    //+------------------------------------------------------------------+
    //| Get volatility index                                             |
    //+------------------------------------------------------------------+
-   double GetVolatilityIndex() const { return volatilityIndex; }
+   double GetVolatilityIndex()  { return volatilityIndex; }
    
    //+------------------------------------------------------------------+
    //| Is regime confirmed?                                             |
    //+------------------------------------------------------------------+
-   bool IsConfirmed() const { return isConfirmed; }
+   bool IsConfirmed()  { return isConfirmed; }
    
    //+------------------------------------------------------------------+
    //| Get regime as string                                             |
    //+------------------------------------------------------------------+
-   string GetRegimeString() const
+   string GetRegimeString() 
    {
       switch(currentRegime)
       {
@@ -611,7 +784,7 @@ public:
    //+------------------------------------------------------------------+
    //| Should trade in direction? (For Recovery Mode)                  |
    //+------------------------------------------------------------------+
-   bool ShouldTradeDirection(ENUM_ORDER_TYPE type) const
+   bool ShouldTradeDirection(ENUM_ORDER_TYPE type) 
    {
       if(!isConfirmed) return true; // Allow both directions if unclear
       
@@ -630,7 +803,7 @@ public:
    //+------------------------------------------------------------------+
    //| Get recommended position size multiplier                         |
    //+------------------------------------------------------------------+
-   double GetPositionSizeMultiplier() const
+   double GetPositionSizeMultiplier() 
    {
       if(!isConfirmed) return 0.5; // Smaller size if unclear
       
@@ -654,4 +827,3 @@ public:
             return 1.0;
       }
    }
-};
