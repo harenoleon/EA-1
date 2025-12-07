@@ -108,9 +108,8 @@ input double   BreakEvenAt           = 1.0;      // เคลื่อนที�
 
 //--- Global Variables
 CTrade trade;
-CTrendEnhanced* trend;
 TeamManager* teamManager;
-CBreakout* breakout;
+
 
 // Managers
 CPositionManager  positionManager;
