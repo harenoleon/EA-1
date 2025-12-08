@@ -57,7 +57,10 @@ public:
    {
       // Constructor initialization
    }
-   
+   virtual void Update()
+   {
+       // Default empty implementation
+   }
    //+------------------------------------------------------------------+
    //| Destructor                                                       |
    //+------------------------------------------------------------------+
@@ -69,30 +72,27 @@ public:
    //+------------------------------------------------------------------+
    //| Initialize strategy                                              |
    //+------------------------------------------------------------------+
-   virtual void Initialize(string name, ulong magic, double w, CMarketRegime* regime)
-   {
-      // ตรวจสอบ parameter
-      if(name == "")
-      {
-         Print("Error: Strategy name cannot be empty!");
-         return;
-      }
+      // Overload สำหรับ strategies
+virtual bool Initialize(string symbol, ENUM_TIMEFRAMES timeframe, int magicNumber,
+                       string name = "", double weight = 0.25, CMarketRegime* regime = NULL)
+{
+    // เก็บค่า
+    this.symbol = symbol;
+    this.timeframe = timeframe;
+    this.magicNumber = magicNumber;
+    
+    if(name != "") this.strategyName = name;
+    this.weight = weight;
+    this.marketRegime = regime;
+    
+    trade.SetExpertMagicNumber(magicNumber);
+    
+    Print(strategyName, " initialized on ", symbol, " ", EnumToString(timeframe),
+          ", Magic=", magicNumber, ", Weight=", DoubleToString(weight * 100, 1), "%");
+    
+    return true;
+}
       
-      strategyName = name;
-      magicNumber = magic;
-      weight = MathMax(0.0, MathMin(w, 1.0)); // จำกัดค่าระหว่าง 0-1
-      
-      if(regime != NULL)
-      {
-         marketRegime = regime;
-      }
-      
-      trade.SetExpertMagicNumber(magicNumber);
-      
-      Print(strategyName, " initialized: Magic=", magicNumber, 
-            ", Weight=", DoubleToString(weight * 100, 1), "%");
-   }
-   
    //+------------------------------------------------------------------+
    //| Initialize without market regime                                 |
    //+------------------------------------------------------------------+
@@ -100,6 +100,47 @@ public:
    {
       Initialize(name, magic, w, NULL);
    }
+   
+   //+------------------------------------------------------------------+
+   //| Update indicators                                                |
+   //+------------------------------------------------------------------+
+
+   //+------------------------------------------------------------------+
+   //| Check for trading signal                                         |
+   //+------------------------------------------------------------------+
+   virtual int CheckSignal()
+   {
+      // Default: no signal
+      return 0;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Check for entry with weight                                      |
+   //+------------------------------------------------------------------+
+   virtual bool CheckForEntry(double weight = 1.0)
+   {
+      // Default implementation
+      return false;
+   }
+   
+   //+------------------------------------------------------------------+
+   //| Check for support entry                                          |
+   //+------------------------------------------------------------------+
+   virtual bool CheckForSupportEntry(double weight = 0.5)
+   {
+      // Default implementation
+      return CheckForEntry(weight * 0.5);
+   }
+   //+------------------------------------------------------------------+
+   //| GetStatistics                                                    |
+   //+------------------------------------------------------------------+
+   virtual void GetStatistics(double &profit, int &positions, double &winRate)
+   {
+       profit = 0.0;
+       positions = 0;
+       winRate = 0.0;
+   }
+
    
    //+------------------------------------------------------------------+
    //| Set Position Manager                                             |
@@ -134,7 +175,11 @@ public:
    //+------------------------------------------------------------------+
    //| Main execution method                                            |
    //+------------------------------------------------------------------+
-   virtual void Execute(ENUM_STRATEGY_ROLE role, double portfolioDrawdown) = 0;
+   virtual void Execute(ENUM_STRATEGY_ROLE role, double portfolioDrawdown)
+      {
+          // Default implementation does nothing
+          // Child classes can override if needed
+      }
    
    //+------------------------------------------------------------------+
    //| Open position with TP/SL management                              |
