@@ -280,6 +280,20 @@ input int    DebugPrintLevel    = 2;
 input group "=== Display ==="
 input bool   ShowDashboard         = true;
 
+// ประกาศเป็น input parameter ที่ต้นไฟล์:
+input group "=== Range Trading Settings ===";
+input bool IsRangeTradingEnabled = true; // Enable Range Trading Strategy
+input double RangeTradingLotSize = 0.1;   // Lot size for range trading
+input int RangeTradingMaxPositions = 2;   // Max simultaneous range positions
+input int RangeTradingStopLossPips = 50;  // SL in pips for range trading
+input int RangeTradingTakeProfitPips = 30; // TP in pips for range trading
+
+input group "=== Adaptive Strategy Settings ===";
+input bool AdaptiveStrategyEnabled = true;     // Enable Adaptive Strategy
+input bool UseRegimeBasedTrading = true;       // Use market regime for trading decisions
+input bool UseRegimeBasedRiskManagement = true; // Adjust risk based on regime
+input bool UseRegimeBasedEntryExit = true;     // Adjust entry/exit based on regime
+
 input group "=== MAGIC NUMBERS FOR RECOVERY SYSTEMS ==="
 input int MAGIC_INDIVIDUAL_RECOVERY           = 8881;
 input int MAGIC_STEPUP_RECOVERY               = 8882;
@@ -290,6 +304,7 @@ input int MAGIC_ULTIMATE__RECOVERY            = 8886;
 
 // --- Global Variables (Market Analysis) ---
 CiMA ma;
+double currentClose = 0;
 CiRSI rsi;
 CiATR atr;
 
@@ -391,6 +406,8 @@ bool breakevenLineCreated = false;
 const int WRONG_VALUE_CONST = -1;
 
 // --- Enum Definitions ---
+
+
 enum ENUM_POSITION_TYPE_CUSTOM 
 {
    POSITION_TYPE_BUY_CUSTOM = 0,
@@ -407,6 +424,7 @@ enum ENUM_SIGNAL_STRENGTH
 };
 
 #ifndef ENUM_TREND_DIRECTION_DEFINED
+
 enum ENUM_TREND_DIRECTION
 {
     TREND_NONE = 0,
@@ -437,6 +455,8 @@ enum ENUM_MARKET_REGIME_DETAILED
     MARKET_REGIME_HIGH_VOLATILITY_DETAILED = 6,
     MARKET_REGIME_NEWS_EVENT_DETAILED = 7
 };
+ENUM_MARKET_REGIME_DETAILED g_regime;
+ENUM_MARKET_REGIME_DETAILED g_newRegime;
 
 enum ENUM_MARKET_REGIME_BASIC
 {
@@ -450,7 +470,8 @@ enum ENUM_MARKET_REGIME_BASIC
 };
 
 // --- Current System State ---
-//
+double MaxVolatilityForRange = 0.0020;    // 0.20%
+double MinVolatilityForRange = 0.0005;    // 0.05%
 //ENUM_MARKET_REGIME_DETAILED currentMarketRegime = MARKET_REGIME_RANGING_CALM_DETAILED;
 ENUM_SYSTEM_MODE SystemMode = MODE_NORMAL;
 ENUM_TREND_DIRECTION g_currentTrend = TREND_NONE;
@@ -479,6 +500,12 @@ ENUM_MARKET_REGIME_DETAILED g_currentRegime = MARKET_REGIME_RANGING_CALM_DETAILE
 #define DIRECTION_UP 1
 #define DIRECTION_DOWN -1
 #define DIRECTION_NEUTRAL 0
+#define MAGIC_RANGE 5000
+#define MAGIC_RANGE_CALM 5001
+#define MAGIC_RANGE_VOLATILE 5002
+#define MAGIC_TREND 6000
+#define MAGIC_TEST 9999
+
 
 // --- Cooperative System Variables ---
 struct StrategyStatus {
@@ -526,6 +553,10 @@ double MaxRiskForTrendTrading = 3.0;
 double MaxRiskForRangeTrading = 2.0;
 double MaxRiskForScalpTrading = 1.5;
 double MaxRiskForBreakoutTrading = 4.0;
+
+bool IsBreakoutTradingEnabled = true;
+bool IsTrendTradingEnabled = true;
+bool IsScalpTradingEnabled = true;
 
 // --- Indicator Handles ---
 int ema9_handle;
@@ -4232,11 +4263,19 @@ double CalculateDynamicBaseTarget()
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
-{
+{  
+  
+   
+   
+
+    g_regime = MARKET_REGIME_UNKNOWN_DETAILED;
+    g_newRegime = MARKET_REGIME_UNKNOWN_DETAILED;
+    
     // Initialize bar time
     g_lastBarTime = iTime(_Symbol, _Period, 0);
     g_newBar = false;
     
+      
       
     // สร้าง indicator handles
     ema9_handle = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
@@ -5146,6 +5185,11 @@ void UseDefaultStrategySimple()
     Print("Default Strategy: No specific action");
     // ไม่ทำอะไร หรือใช้ strategy ที่ conservative
 }
+void ExecuteTraditionalStrategy()
+{
+    Print("Executing Traditional Strategy");
+    ExecuteAdvancedBreakout(MARKET_REGIME_UNKNOWN_DETAILED);
+}
 //----------------ontick New system ---------------//
 void OnTick()
 {
@@ -5156,8 +5200,20 @@ void OnTick()
       CloseAllPositions("ProfitTarget", "Target achieved");
       return;
    }
-   
+   currentClose = iClose(_Symbol, _Period, 0);
    // อัพเดท market analysis
+   ENUM_MARKET_REGIME_DETAILED currentRegime = DetectMarketRegime();
+    
+    if(AdaptiveStrategyEnabled)
+    {
+        // ใช้ adaptive strategy
+        ExecuteAdaptiveStrategy(currentRegime);
+    }
+    else
+    {
+        // ใช้ traditional strategy
+        ExecuteTraditionalStrategy();
+    }
    if(UseMarketAnalysis) 
    {
       UpdateMarketAnalysis();
@@ -9910,6 +9966,31 @@ void ExecuteAdvancedBreakout(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_
         DebugPrint(3, "No Breakout signals detected for " + RegimeToString(regime));
     }
 }
+
+//---//
+double GetBreakoutLotMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    switch(currentRegime)
+    {
+        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+            return 1.5; // ใช้ lot มากกว่าใน trending strong
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+            return 1.2;
+        case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
+            return 1.8; // ใช้ lot มากที่สุดใน breakout potential
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+            return 0.5; // ใช้ lot น้อยใน high volatility
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            return 0.8;
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+            return 1.0;
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            return 0.3; // ใช้ lot น้อยที่สุดในข่าว
+        default:
+            return 1.0;
+    }
+}
+
 //----scalp1
 bool IsMarketGoodForScalp1()
 {
@@ -11743,26 +11824,249 @@ void ExecuteStrategy(ENUM_MARKET_REGIME_DETAILED regime)
     {
         case MARKET_REGIME_RANGING_CALM_DETAILED:
             // Execute calm range strategy
-            // ExecuteRangeCalmStrategy();
+            ExecuteRangeCalmStrategy(regime);
             break;
             
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
             // Execute volatile range strategy  
-            // ExecuteRangeVolatileStrategy();
+            ExecuteRangeVolatileStrategy(regime);
             break;
             
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
         case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
-        case MARKET_REGIME_NORMAL:
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
         default:
-            ExecuteBreakoutStrategy();
+            ExecuteAdvancedBreakout(regime); // เรียกฟังก์ชันที่ต้องการพารามิเตอร์
             break;
     }
 }
-// ===== BREAKOUT STRATEGY EXECUTION =====
+// ==================== ฟังก์ชันช่วยเหลือสำหรับ Range Trading ==============//
+// 1. ตรวจสอบจำนวน position ที่เป็น range
+int CountRangePositions()
+{
+    int count = 0;
+    int total = PositionsTotal();
+    
+    for(int i = total-1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            long magic = PositionGetInteger(POSITION_MAGIC);
+            // ตรวจสอบว่าเป็น position ของ range trading หรือไม่
+            if(magic == MAGIC_RANGE || magic == MAGIC_RANGE_CALM || magic == MAGIC_RANGE_VOLATILE)
+            {
+                count++;
+            }
+        }
+    }
+    return count;
+}
 
+// 2. รับจำนวน position สูงสุดตาม regime
+int GetMaxRangePositionsForRegime(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    switch(currentRegime)
+    {
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+            return 2; // เปิดได้ 2 positions ใน calm range
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            return 1; // เปิดได้ 1 position ใน volatile range
+        default:
+            return 0; // ไม่เปิดใน regime อื่นๆ
+    }
+}
+bool ShouldBuyInRange(ENUM_MARKET_REGIME_DETAILED currentRegime, double currentPrice, double rangeLow)
+{
+    // ตรวจสอบว่าเป็น regime ที่เหมาะสม
+    if(currentRegime != MARKET_REGIME_RANGING_CALM_DETAILED && 
+       currentRegime != MARKET_REGIME_RANGING_VOLATILE_DETAILED)
+    {
+        return false;
+    }
+    
+    // ตรวจสอบว่าราคาอยู่ใกล้ support หรือไม่
+    double distanceToLow = (currentPrice - rangeLow) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double rangeHeight = (GetRangeHigh() - rangeLow) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    
+    // ซื้อเมื่อราคาอยู่ใน 30% ล่างของ range
+    if(distanceToLow < (rangeHeight * 0.3))
+    {
+        // ตรวจสอบ RSI สำหรับ oversold
+        double rsiValue = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+        if(rsiValue < 30) // Oversold
+        {
+            return true;
+        }
+    }
+    
+    return false;
+}
+bool ShouldSellInRange(ENUM_MARKET_REGIME_DETAILED currentRegime, double currentPrice, double rangeHigh)
+{
+    // ตรวจสอบว่าเป็น regime ที่เหมาะสม
+    if(currentRegime != MARKET_REGIME_RANGING_CALM_DETAILED && 
+       currentRegime != MARKET_REGIME_RANGING_VOLATILE_DETAILED)
+    {
+        return false;
+    }
+    
+    // ตรวจสอบว่าราคาอยู่ใกล้ resistance หรือไม่
+    double distanceToHigh = (rangeHigh - currentPrice) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double rangeHeight = (rangeHigh - GetRangeLow()) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    
+    // ขายเมื่อราคาอยู่ใน 30% บนของ range
+    if(distanceToHigh < (rangeHeight * 0.3))
+    {
+        // ตรวจสอบ RSI สำหรับ overbought
+        double rsiValue = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+        if(rsiValue > 70) // Overbought
+        {
+            return true;
+        }
+    }
+    
+    return false;
+}
+void ExecuteRangeBuy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    double lotSize = CalculateRangeLotSize(currentRegime);
+    double slPrice = GetRangeStopLoss(true, currentRegime);
+    double tpPrice = GetRangeTakeProfit(true, currentRegime);
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lotSize;
+    request.type = ORDER_TYPE_BUY;
+    request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    request.sl = slPrice;
+    request.tp = tpPrice;
+    request.magic = (currentRegime == MARKET_REGIME_RANGING_CALM_DETAILED) ? MAGIC_RANGE_CALM : MAGIC_RANGE_VOLATILE;
+    request.comment = "Range Buy - " + RegimeToString(currentRegime);
+    
+    if(OrderSend(request, result))
+    {
+        Print("✅ Range BUY executed | Regime: " + RegimeToString(currentRegime) + 
+              " | Lot: " + DoubleToString(lotSize, 2));
+    }
+    else
+    {
+        Print("❌ Range BUY failed: Error ", result.retcode);
+    }
+}
+void ExecuteRangeSell(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    double lotSize = CalculateRangeLotSize(currentRegime);
+    double slPrice = GetRangeStopLoss(false, currentRegime);
+    double tpPrice = GetRangeTakeProfit(false, currentRegime);
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lotSize;
+    request.type = ORDER_TYPE_SELL;
+    request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    request.sl = slPrice;
+    request.tp = tpPrice;
+    request.magic = (currentRegime == MARKET_REGIME_RANGING_CALM_DETAILED) ? MAGIC_RANGE_CALM : MAGIC_RANGE_VOLATILE;
+    request.comment = "Range Sell - " + RegimeToString(currentRegime);
+    
+    if(OrderSend(request, result))
+    {
+        Print("✅ Range SELL executed | Regime: " + RegimeToString(currentRegime) + 
+              " | Lot: " + DoubleToString(lotSize, 2));
+    }
+    else
+    {
+        Print("❌ Range SELL failed: Error ", result.retcode);
+    }
+}
+// 9. คำนวณ lot size สำหรับ range trading
+double CalculateRangeLotSize(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    double baseLot = BaseLot;
+    
+    switch(currentRegime)
+    {
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+            return NormalizeDouble(baseLot * 0.5, 2); // ใช้ lot น้อยลงใน calm range
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            return NormalizeDouble(baseLot * 0.3, 2); // ใช้ lot น้อยที่สุดใน volatile range
+        default:
+            return NormalizeDouble(baseLot * 0.5, 2);
+    }
+}
+// 10. หา Stop Loss สำหรับ range trading
+double GetRangeStopLoss(bool isBuy, ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    double rangeHigh = GetRangeHigh();
+    double rangeLow = GetRangeLow();
+    double atrValue = iATR(_Symbol, PERIOD_H1, 14);
+    
+    if(isBuy)
+    {
+        // สำหรับ Buy: SL อยู่ใต้ range low
+        double slDistance = (currentRegime == MARKET_REGIME_RANGING_VOLATILE_DETAILED) ? atrValue * 2 : atrValue;
+        return rangeLow - slDistance;
+    }
+    else
+    {
+        // สำหรับ Sell: SL อยู่เหนือ range high
+        double slDistance = (currentRegime == MARKET_REGIME_RANGING_VOLATILE_DETAILED) ? atrValue * 2 : atrValue;
+        return rangeHigh + slDistance;
+    }
+}
+
+// 11. หา Take Profit สำหรับ range trading
+double GetRangeTakeProfit(bool isBuy, ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    double rangeHigh = GetRangeHigh();
+    double rangeLow = GetRangeLow();
+    double rangeHeight = rangeHigh - rangeLow;
+    
+    if(isBuy)
+    {
+        // สำหรับ Buy: TP อยู่ที่กลาง range หรือด้านบน
+        return rangeLow + (rangeHeight * 0.7); // 70% ของ range height
+    }
+    else
+    {
+        // สำหรับ Sell: TP อยู่ที่กลาง range หรือด้านล่าง
+        return rangeHigh - (rangeHeight * 0.7); // 70% ของ range height
+    }
+}
+// ==================== ฟังก์ชันช่วยเหลือสำหรับ Range Trading ===============//
+// ===== BREAKOUT STRATEGY EXECUTION =====
+bool IsRangeTradingSuitableForRegime(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    // Range trading เหมาะกับ ranging markets เท่านั้น
+    switch(currentRegime)
+    {
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            return true;
+        default:
+            return false;
+    }
+}
 void ExecuteCalmRangeTrading(ENUM_MARKET_REGIME_DETAILED regime)
 {
+
+ // ตรวจสอบว่าเป็น regime ที่เหมาะกับ range trading หรือไม่
+    if(regime != MARKET_REGIME_RANGING_CALM_DETAILED && 
+       regime != MARKET_REGIME_RANGING_VOLATILE_DETAILED)
+    {
+        Print("Range trading not suitable for current regime: " + RegimeToString(regime));
+        return;
+    }
+    
     if(!IsRangeTradingEnabled) 
     {
         Print("Range trading disabled");
@@ -11804,7 +12108,215 @@ void ExecuteCalmRangeTrading(ENUM_MARKET_REGIME_DETAILED regime)
         Print("No range trading signals detected");
     }
 }
+double GetStopLossMultiplierForVolatileRange()
+{
+    // ในช่วง volatile range ใช้ tighter stop loss (คูณด้วยค่าที่น้อยกว่า 1)
+    return 0.7; // ใช้ SL แค่ 70% ของปกติ
+}
 
+// หรือฟังก์ชันที่ปรับตาม volatility:
+double GetStopLossMultiplierForRegime(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    switch(currentRegime)
+    {
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            return 0.7; // 70% ใน volatile range
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+            return 0.5; // 50% ใน high volatility
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            return 0.3; // 30% ในช่วงข่าว
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+            return 1.0; // 100% ใน calm range
+        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+            return 1.5; // 150% ใน strong trend (ให้ SL ใหญ่ขึ้น)
+        default:
+            return 1.0; // ปกติ
+    }
+}
+bool IsBullishReversalPattern(int shift = 0)
+{
+    // ตรวจสอบ bullish reversal pattern ง่ายๆ (pin bar, hammer, etc.)
+    double open = iOpen(_Symbol, _Period, shift);
+    double close = iClose(_Symbol, _Period, shift);
+    double high = iHigh(_Symbol, _Period, shift);
+    double low = iLow(_Symbol, _Period, shift);
+    
+    double bodySize = MathAbs(close - open);
+    double upperWick = high - MathMax(open, close);
+    double lowerWick = MathMin(open, close) - low;
+    double totalRange = high - low;
+    
+    // Hammer pattern: lower wick ยาว, body สั้น, upper wick สั้น
+    if(bodySize < totalRange * 0.3 && lowerWick > bodySize * 2 && upperWick < bodySize)
+    {
+        return true;
+    }
+    
+    // Bullish pin bar
+    if(lowerWick > bodySize * 3 && upperWick < bodySize * 0.5)
+    {
+        return true;
+    }
+    
+    return false;
+}
+bool ShouldBuyInVolatileRange(ENUM_MARKET_REGIME_DETAILED currentRegime, double currentPrice, double rangeLow, double volatility)
+{
+    // ตรวจสอบว่าเป็น volatile range regime หรือไม่
+    if(currentRegime != MARKET_REGIME_RANGING_VOLATILE_DETAILED)
+        return false;
+    
+    // คำนวณ distance จาก range low
+    double distanceFromLow = (currentPrice - rangeLow) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double rangeHeight = (GetRangeHigh() - rangeLow) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    
+    // ใน volatile range ใช้ entry threshold ที่ต่ำกว่า (20% แทน 30%)
+    double entryThreshold = 0.2; // 20%
+    
+    if(distanceFromLow < (rangeHeight * entryThreshold))
+    {
+        // ตรวจสอบ oversold condition ด้วย RSI
+        double rsiValue = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+        if(rsiValue < 35) // ใช้ระดับ oversold ที่สูงกว่าใน volatile range
+        {
+            // ตรวจสอบ price action: pin bar หรือ bullish reversal pattern
+            if(IsBullishReversalPattern(0))
+            {
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+bool IsBearishReversalPattern(int shift = 0)
+{
+    // ตรวจสอบ bearish reversal pattern ง่ายๆ (shooting star, bearish pin bar, etc.)
+    double open = iOpen(_Symbol, _Period, shift);
+    double close = iClose(_Symbol, _Period, shift);
+    double high = iHigh(_Symbol, _Period, shift);
+    double low = iLow(_Symbol, _Period, shift);
+    
+    double bodySize = MathAbs(close - open);
+    double upperWick = high - MathMax(open, close);
+    double lowerWick = MathMin(open, close) - low;
+    double totalRange = high - low;
+    
+    // Shooting star pattern: upper wick ยาว, body สั้น, lower wick สั้น
+    if(bodySize < totalRange * 0.3 && upperWick > bodySize * 2 && lowerWick < bodySize)
+    {
+        return true;
+    }
+    
+    // Bearish pin bar
+    if(upperWick > bodySize * 3 && lowerWick < bodySize * 0.5)
+    {
+        return true;
+    }
+    
+    return false;
+}
+bool ShouldSellInVolatileRange(ENUM_MARKET_REGIME_DETAILED currentRegime, double currentPrice, double rangeHigh, double volatility)
+{
+    // ตรวจสอบว่าเป็น volatile range regime หรือไม่
+    if(currentRegime != MARKET_REGIME_RANGING_VOLATILE_DETAILED)
+        return false;
+    
+    // คำนวณ distance จาก range high
+    double distanceFromHigh = (rangeHigh - currentPrice) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double rangeHeight = (rangeHigh - GetRangeLow()) / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    
+    // ใน volatile range ใช้ entry threshold ที่ต่ำกว่า (20% แทน 30%)
+    double entryThreshold = 0.2; // 20%
+    
+    if(distanceFromHigh < (rangeHeight * entryThreshold))
+    {
+        // ตรวจสอบ overbought condition ด้วย RSI
+        double rsiValue = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+        if(rsiValue > 65) // ใช้ระดับ overbought ที่ต่ำกว่าใน volatile range
+        {
+            // ตรวจสอบ price action: pin bar หรือ bearish reversal pattern
+            if(IsBearishReversalPattern(0))
+            {
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+void ExecuteVolatileRangeBuy(ENUM_MARKET_REGIME_DETAILED currentRegime, double slMultiplier)
+{
+    double baseLot = BaseLot;
+    double lotSize = NormalizeDouble(baseLot * 0.5, 2); // ใช้ lot น้อยลงใน volatile range
+    
+    // คำนวณ SL และ TP
+    int slPips = (int)(RangeTradingStopLossPips * slMultiplier);
+    int tpPips = (int)(RangeTradingTakeProfitPips * 0.8); // TP น้อยลงใน volatile range
+    
+    double slPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID) - (slPips * SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+    double tpPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID) + (tpPips * SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lotSize;
+    request.type = ORDER_TYPE_BUY;
+    request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    request.sl = slPrice;
+    request.tp = tpPrice;
+    request.magic = MAGIC_RANGE_VOLATILE;
+    request.comment = "Volatile Range Buy";
+    
+    if(OrderSend(request, result))
+    {
+        Print("✅ Volatile Range BUY executed | Lot: " + DoubleToString(lotSize, 2) + 
+              " | SL: " + IntegerToString(slPips) + "pips | TP: " + IntegerToString(tpPips) + "pips");
+    }
+    else
+    {
+        Print("❌ Volatile Range BUY failed: Error ", result.retcode);
+    }
+}
+
+void ExecuteVolatileRangeSell(ENUM_MARKET_REGIME_DETAILED currentRegime, double slMultiplier)
+{
+    double baseLot = BaseLot;
+    double lotSize = NormalizeDouble(baseLot * 0.5, 2); // ใช้ lot น้อยลงใน volatile range
+    
+    // คำนวณ SL และ TP
+    int slPips = (int)(RangeTradingStopLossPips * slMultiplier);
+    int tpPips = (int)(RangeTradingTakeProfitPips * 0.8); // TP น้อยลงใน volatile range
+    
+    double slPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + (slPips * SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+    double tpPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - (tpPips * SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lotSize;
+    request.type = ORDER_TYPE_SELL;
+    request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    request.sl = slPrice;
+    request.tp = tpPrice;
+    request.magic = MAGIC_RANGE_VOLATILE;
+    request.comment = "Volatile Range Sell";
+    
+    if(OrderSend(request, result))
+    {
+        Print("✅ Volatile Range SELL executed | Lot: " + DoubleToString(lotSize, 2) + 
+              " | SL: " + IntegerToString(slPips) + "pips | TP: " + IntegerToString(tpPips) + "pips");
+    }
+    else
+    {
+        Print("❌ Volatile Range SELL failed: Error ", result.retcode);
+    }
+}
 void ExecuteVolatileRangeTrading(ENUM_MARKET_REGIME_DETAILED regime)
 {
     if(!IsRangeTradingEnabled) 
@@ -11817,6 +12329,7 @@ void ExecuteVolatileRangeTrading(ENUM_MARKET_REGIME_DETAILED regime)
     
     // 1. ตรวจสอบ volatility
     double volatility = CalculateCurrentVolatility();
+    
     if(volatility > MaxVolatilityForRange) 
     {
         Print("Volatility too high for range trading: ", volatility);
@@ -11834,7 +12347,7 @@ void ExecuteVolatileRangeTrading(ENUM_MARKET_REGIME_DETAILED regime)
     }
     
     // 3. ใช้ tighter stop loss ใน volatile range
-    double stopLossMultiplier = GetStopLossMultiplierForVolatileRange();
+    double stopLossMultiplier = GetStopLossMultiplierForRegime(regime);
     
     // 4. หา range boundaries
     double rangeHigh = GetRangeHigh();
@@ -11930,29 +12443,40 @@ void ManageOpenPosition()
 {
     // Manage existing position (trailing stop, etc.)
 }
-void ExecuteBreakoutStrategyByRegime(ENUM_MARKET_REGIME_DETAILED regime)
+void ExecuteBreakoutStrategyByRegime(ENUM_MARKET_REGIME_DETAILED currentregime)
 {
     // Check if we should execute breakout strategy
     bool shouldExecute = false;
     
-    switch(regime)
+    switch(currentregime)
     {
         case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
-        case MARKET_REGIME_NORMAL:
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
             shouldExecute = true;
             break;
             
         case MARKET_REGIME_RANGING_CALM_DETAILED:
         case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
-            // Usually avoid breakout in ranging markets
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            // Usually avoid breakout in ranging markets or high volatility
             shouldExecute = false;
+            break;
+            
+        default:
+            shouldExecute = true;
             break;
     }
     
     if(shouldExecute)
     {
-        ExecuteBreakoutStrategy();  // Call the original function
+        // ส่ง regime ไปด้วย
+        ExecuteAdvancedBreakout(currentregime);
+    }
+    else
+    {
+        Print("Breakout strategy not suitable for regime: " + RegimeToString(currentregime));
     }
 }
 // ===== VOLATILE RANGE STRATEGY =====
@@ -12131,7 +12655,7 @@ void ExecuteAdaptiveStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_
             break;
             
         case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
-            ExecuteBreakoutStrategy(regime);
+            ExecuteAdvancedBreakout(regime);
             break;
             
         case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
@@ -12150,6 +12674,163 @@ void ExecuteAdaptiveStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_
     // บันทึกการดำเนินการ
     RecordStrategyExecution(regime);
 }
+void AdjustStrategyParameters(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Adjusting strategy parameters for regime: " + RegimeToString(currentRegime));
+    
+    switch(currentRegime)
+    {
+        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+            // ใช้ TP ใหญ่, SL ใหญ่, lot ปกติ
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 2;
+            CurrentStopLossPips = DefaultStopLossPips * 1.5;
+            CurrentLotMultiplier = 1.0;
+            break;
+            
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 1.2;
+            CurrentStopLossPips = DefaultStopLossPips * 1.0;
+            CurrentLotMultiplier = 0.8;
+            break;
+            
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 0.7;
+            CurrentStopLossPips = DefaultStopLossPips * 0.8;
+            CurrentLotMultiplier = 0.6;
+            break;
+            
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 0.5;
+            CurrentStopLossPips = DefaultStopLossPips * 0.6;
+            CurrentLotMultiplier = 0.4;
+            break;
+            
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 0.3;
+            CurrentStopLossPips = DefaultStopLossPips * 0.5;
+            CurrentLotMultiplier = 0.3;
+            break;
+            
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 0.4;
+            CurrentStopLossPips = DefaultStopLossPips * 0.4;
+            CurrentLotMultiplier = 0.2;
+            break;
+            
+        default:
+            CurrentTakeProfitPips = DefaultTakeProfitPips;
+            CurrentStopLossPips = DefaultStopLossPips;
+            CurrentLotMultiplier = 1.0;
+            break;
+    }
+}
+// 2. ตรวจสอบว่าอนุญาตให้เทรดใน regime นี้หรือไม่
+bool IsTradingAllowedInRegime(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    switch(currentRegime)
+    {
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            Print("Trading not recommended in " + RegimeToString(currentRegime));
+            return false;
+            
+        default:
+            return true;
+    }
+}
+
+// 3. Trend Following Strategy
+void ExecuteTrendFollowingStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Executing Trend Following Strategy");
+    // ใช้ moving average crossover, momentum indicators
+    // ...
+}
+
+// 4. Mild Trend Strategy
+void ExecuteMildTrendStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Executing Mild Trend Strategy");
+    // ใช้ trend strategy แต่ conservative กว่า
+    // ...
+}
+
+// 5. Range Trading Strategy
+void ExecuteRangeTradingStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Executing Range Trading Strategy");
+    // เรียกใช้ฟังก์ชันที่มีอยู่
+    ExecuteCalmRangeTrading(currentRegime);
+}
+
+// 6. Volatile Range Strategy
+void ExecuteVolatileRangeStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Executing Volatile Range Strategy");
+    // เรียกใช้ฟังก์ชันที่มีอยู่
+    ExecuteVolatileRangeTrading(currentRegime);
+}
+
+// 7. Safe Mode Strategy (สำหรับ high volatility)
+void ExecuteSafeModeStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Executing Safe Mode Strategy");
+    // ใช้ lot น้อยมาก, SL สั้น, TP สั้น
+    // หรืออาจจะไม่เทรดเลย
+    if(AllowTradingInSafeMode)
+    {
+        // เทรดแบบ conservative มาก
+        ExecuteConservativeStrategy(currentRegime);
+    }
+    else
+    {
+        Print("Safe Mode: Trading disabled");
+    }
+}
+
+// 8. News Event Strategy
+void ExecuteNewsEventStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Executing News Event Strategy");
+    // อาจจะไม่เทรด หรือรอให้ volatility ลดลง
+    if(AllowNewsTrading)
+    {
+        ExecuteNewsTrading(currentRegime);
+    }
+    else
+    {
+        Print("News Trading disabled");
+    }
+}
+
+// 9. Default Strategy
+void ExecuteDefaultStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    Print("Executing Default Strategy for regime: " + RegimeToString(currentRegime));
+    // ใช้ strategy พื้นฐาน
+    ExecuteBasicStrategy();
+}
+
+
+
+
+// 11. ฟังก์ชันพื้นฐาน
+void ExecuteBasicStrategy()
+{
+    // Strategy พื้นฐานที่ใช้ก่อนมี adaptive
+    Print("Executing Basic Strategy");
+    // ... logic พื้นฐาน ...
+}
+
+// 12. บันทึกการ execute
+void RecordStrategyExecution(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    // บันทึกลงไฟล์หรือตัวแปร
+    string record = TimeToString(TimeCurrent()) + " - Executed " + 
+                   RegimeToString(currentRegime) + " strategy";
+    Print(record);
+}
+
 void ExecuteNormalStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_NORMAL)
 {
     // Only execute if regime is normal
@@ -12159,7 +12840,7 @@ void ExecuteNormalStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_NO
         switch(regime)
         {
             case MARKET_REGIME_TRENDING_STRONG_DETAILED:
-                ExecuteBreakoutStrategy(ENUM_MARKET_REGIME_DETAILED regime);
+                ExecuteAdvancedBreakout(ENUM_MARKET_REGIME_DETAILED regime);
                 break;
             case MARKET_REGIME_RANGING_CALM_DETAILED:
                 ExecuteRangeCalmStrategy();
@@ -12168,7 +12849,7 @@ void ExecuteNormalStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_NO
                 // ExecuteRangeVolatileStrategy(ENUM_MARKET_REGIME_DETAILED regime);
                 break;
             case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
-                ExecuteBreakoutStrategy(ENUM_MARKET_REGIME_DETAILED regime);
+                ExecuteAdvancedBreakout(ENUM_MARKET_REGIME_DETAILED regime);
                 break;
         }
         return;
@@ -20686,7 +21367,68 @@ void CheckAndHandleBreakout()
         }
     }
 }
+// 1. ฟังก์ชันวิเคราะห์สภาพตลาด
+int AnalyzeMarketCondition()
+{
+    // ใช้การ detect market regime ที่มีอยู่แล้ว
+    ENUM_MARKET_REGIME_DETAILED regime = DetectMarketRegime();
+    return (int)regime; // แปลงเป็น int
+}
 
+// 2. ฟังก์ชันตรวจสอบการยืนยัน breakout
+bool IsBreakoutConfirmed(ENUM_MARKET_REGIME_DETAILED currentRegime)
+{
+    if(currentRegime != MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED)
+        return false;
+    
+    // ตรวจสอบ price action สำหรับ breakout
+    double currentHigh = iHigh(_Symbol, _Period, 0);
+    double currentLow = iLow(_Symbol, _Period, 0);
+    double previousHigh = iHigh(_Symbol, _Period, 1);
+    double previousLow = iLow(_Symbol, _Period, 1);
+    
+    // ตรวจสอบ volume (ถ้ามี)
+    long currentVolume = iVolume(_Symbol, _Period, 0);
+    long previousVolume = iVolume(_Symbol, _Period, 1);
+    
+    // เงื่อนไข breakout: ราคา breakout พร้อม volume สูงขึ้น
+    bool priceBreakout = (currentHigh > previousHigh && currentClose > previousHigh) || 
+                         (currentLow < previousLow && currentClose < previousLow);
+    
+    bool volumeConfirmation = (currentVolume > previousVolume * 1.2);
+    
+    return (priceBreakout && volumeConfirmation);
+}
+void RecordBreakoutEvent()
+{
+    string filename = "breakout_log_" + Symbol() + ".txt";
+    int handle = FileOpen(filename, FILE_READ|FILE_WRITE|FILE_TXT|FILE_SHARE_READ);
+    
+    if(handle != INVALID_HANDLE)
+    {
+        FileSeek(handle, 0, SEEK_END);
+        string record = TimeToString(TimeCurrent()) + 
+                       " - Breakout detected on " + Symbol() + 
+                       " at price: " + DoubleToString(SymbolInfoDouble(Symbol(), SYMBOL_BID), Digits());
+        FileWrite(handle, record);
+        FileClose(handle);
+    }
+}
+
+// 3. ฟังก์ชันจัดการ confirmed breakout
+void HandleConfirmedBreakout()
+{
+    Print("✅ CONFIRMED BREAKOUT - Executing breakout strategy");
+    
+    // เรียกใช้ฟังก์ชัน breakout ที่มีอยู่
+    ExecuteAdvancedBreakout(MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED);
+    
+    // หรือใช้กลยุทธ์เฉพาะ breakout
+    ExecuteBreakoutStrategy();
+    
+    // บันทึกลงไฟล์หรือ log
+    RecordBreakoutEvent();
+}
 bool IsEconomicNewsTime()
 {
     // ตรวจสอบช่วงข่าวเศรษฐกิจ (ตัวอย่าง)
@@ -21461,14 +22203,20 @@ double GetRangeLow()
     
     return lowBuffer[ArrayMinimum(lowBuffer, 0, 20)];
 }
-void UseVolatileMarketStrategy()
+// เปลี่ยนฟังก์ชันให้รับพารามิเตอร์
+void UseVolatileMarketStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime = MARKET_REGIME_UNKNOWN_DETAILED)
 {
+    Print("Using volatile market strategy for regime: " + RegimeToString(currentRegime));
+    
+    // ตรวจสอบว่าเป็น volatile market จริงหรือไม่
+    if(currentRegime != MARKET_REGIME_RANGING_VOLATILE_DETAILED && 
+       currentRegime != MARKET_REGIME_HIGH_VOLATILITY_DETAILED)
+    {
+        Print("Not a volatile market regime");
+        return;
+    }
+    
     // ใช้กลยุทธ์ระมัดระวังในตลาดผันผวน
-    // ✅ ใช้ฟังก์ชันเปิดออร์เดอร์ปกติที่มีอยู่
-    // ✅ ไม่ต้องลดล็อต แต่เปิดน้อยลงโดยตรวจสอบเงื่อนไขเข้มงวด
-    
-     Print("Using volatile market strategy");
-    
     if(CountBuy < (MaxTrade / 2) && IsUptrend() && CalculateTotalProfit() > -20)
     {
         OpenBuyOrder(); // ใช้ฟังก์ชันเปิดออร์เดอร์ปกติ
@@ -21478,6 +22226,10 @@ void UseVolatileMarketStrategy()
     {
         OpenSellOrder(); // ใช้ฟังก์ชันเปิดออร์เดอร์ปกติ
         Print("Cautious SELL in volatile market");
+    }
+    else
+    {
+        Print("No trade in volatile market - conditions not met");
     }
 }
 // ========== ADD THIS FUNCTION ==========
