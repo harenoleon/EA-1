@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                              Naver Give up 6.mq5 |
+//|                                             Never Everything.mq5 |
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
@@ -17,6 +17,8 @@
 #include <Indicators\Trend.mqh>
 #include <Indicators\Oscilators.mqh>
 #include <Indicators\Volumes.mqh>
+#include <Indicators\Indicator.mqh>
+#include <Arrays\ArrayObj.mqh>
 
 // --- Input parameters (Market Analysis & Risk Management) ---
 input group "=== Market Analysis Settings ==="
@@ -143,6 +145,10 @@ input bool   AI_TrendTrading_Enabled   = false;
 input long   AI_News_Magic             = 5005;
 input long   AI_Trend_Magic            = 5006;
 
+input bool Input_AllowNewsTrading = false;           // Allow Trading During News Events
+input double Input_NewsRiskMultiplier = 0.2;         // News Risk Multiplier (0.2 = 20%)
+input int Input_NewsPauseMinutes = 30;   
+
 input group "=== Close Conditions ==="  
 input bool   Close_OnTarget         = true;
 input bool   Close_OnBreakEven      = true;
@@ -254,6 +260,10 @@ input int    MaxConsecutiveLosses  = 3;
 input bool   AutoStopRecovery      = true;
 input double SafetyStopThreshold   = 80.0;
 
+input group "=== Safe Mode Trading ==="
+input bool Input_AllowSafeModeTrading = false;
+input double Input_SafeModeRiskLevel = 0.3;  // 30% risk
+
 input group "=== Smart Portfolio Closing ==="  
 input double SmartCloseProfitTarget = 50.0;
 input int    SmartCloseMinPositions = 3;
@@ -308,6 +318,8 @@ double currentClose = 0;
 CiRSI rsi;
 CiATR atr;
 
+// แบบที่ 1: ใช้ input parameters
+
 //double   g_currentRegime = 0;
 double   g_previousRegime = 0;
 double   g_regimeStrength = 0.0;
@@ -337,6 +349,14 @@ double g_EmergencyDrawdownThreshold = 20.0;
 double g_EmergencyMarginLevel = 100.0;
 int g_MaxConsecutiveLosses = 5;
 
+// ในส่วน global variables (ต้นไฟล์)
+double DefaultTakeProfitPips = 50.0;     // ค่า TP เริ่มต้น
+double DefaultStopLossPips = 30.0;       // ค่า SL เริ่มต้น
+double DefaultLotMultiplier = 1.0;       // ค่า lot multiplier เริ่มต้น
+
+double CurrentTakeProfitPips = 50.0;     // ค่า TP ปัจจุบัน
+double CurrentStopLossPips = 30.0;       // ค่า SL ปัจจุบัน  
+double CurrentLotMultiplier = 1.0;       // ค่า lot multiplier ปัจจุบัน
 // News variables
 struct NewsEvent {
     datetime time;
@@ -10053,14 +10073,14 @@ bool PriceActionBreakdown()
 {
     // Method 1: Break below recent low
     double recentLow = iLow(Symbol(), PERIOD_CURRENT, iLowest(Symbol(), PERIOD_CURRENT, MODE_LOW, 5, 1));
-    double currentClose = iClose(Symbol(), PERIOD_CURRENT, 0);
+    double c_currentClose = iClose(Symbol(), PERIOD_CURRENT, 0);
     
-    if(currentClose < recentLow)
+    if(c_currentClose < recentLow)
         return true;
     
     // Method 2: Break below support level with confirmation
     double supportLevel = CalculateSupportLevel();
-    if(currentClose < supportLevel && iClose(Symbol(), PERIOD_CURRENT, 1) < iClose(Symbol(), PERIOD_CURRENT, 2))
+    if(c_currentClose < supportLevel && iClose(Symbol(), PERIOD_CURRENT, 1) < iClose(Symbol(), PERIOD_CURRENT, 2))
         return true;
         
     return false;
@@ -10123,7 +10143,7 @@ bool DetectBreakoutBuyOriginal()
     }
     
     // 3. ตรวจสอบ momentum - ใช้ GetRSIValue ของคุณ
-    double rsiValue = GetRSIValue(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+    double rsiValue = GetRSIValue(_Symbol, PERIOD_H1, 14, 0);
     if(rsiValue > 70) // ไม่ซื้อใน overbought
     {
         if(EnableDebugMode) Print("RSI overbought: ", rsiValue);
@@ -10234,7 +10254,7 @@ bool DetectBreakoutSellOriginal()
     }
     
     // 3. ตรวจสอบ momentum - ใช้ GetRSIValue ของคุณ
-    double rsiValue = GetRSIValue(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+    double rsiValue = GetRSIValue(_Symbol, PERIOD_H1, 14, 0);
     if(rsiValue < 30) // ไม่ขายใน oversold
     {
         if(EnableDebugMode) Print("RSI oversold: ", rsiValue);
@@ -10441,8 +10461,8 @@ bool DetectBreakoutSellInStrongTrend(double trendStrengthThreshold = 25.0)
     }
     
     // 3. Price below both MAs
-    double currentClose = iClose(Symbol(), PERIOD_CURRENT, 0);
-    if(currentClose >= maFast)  // Price not below fast MA
+    double c_currentClose = iClose(Symbol(), PERIOD_CURRENT, 0);
+    if(c_currentClose >= maFast)  // Price not below fast MA
     {
         // Print("Price not below fast MA");
         return false;
@@ -10450,7 +10470,7 @@ bool DetectBreakoutSellInStrongTrend(double trendStrengthThreshold = 25.0)
     
     // 4. Break below recent support
     double supportLevel = CalculateSupportLevel(10);
-    if(currentClose >= supportLevel)
+    if(c_currentClose >= supportLevel)
     {
         // Print("Price not below support level");
         return false;
@@ -10537,7 +10557,7 @@ bool IsTrendBullish(ENUM_TIMEFRAMES tf)
 {
    double ema20 = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
    double ema50 = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
-   double currentClose = iClose(_Symbol, tf, 0);
+   double c_currentClose = iClose(_Symbol, tf, 0);
    
    return (ema20 > ema50 && currentClose > ema20);
 }
@@ -10549,7 +10569,7 @@ bool IsTrendBearish(ENUM_TIMEFRAMES tf)
 {
    double ema20 = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
    double ema50 = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
-   double currentClose = iClose(_Symbol, tf, 0);
+   double c_currentClose = iClose(_Symbol, tf, 0);
    
    return (ema20 < ema50 && currentClose < ema20);
 }
@@ -12678,11 +12698,16 @@ void AdjustStrategyParameters(ENUM_MARKET_REGIME_DETAILED currentRegime)
 {
     Print("Adjusting strategy parameters for regime: " + RegimeToString(currentRegime));
     
+    // บันทึกค่าเดิมก่อนปรับ (สำหรับ debugging)
+    double oldTP = CurrentTakeProfitPips;
+    double oldSL = CurrentStopLossPips;
+    double oldLotMult = CurrentLotMultiplier;
+    
     switch(currentRegime)
     {
         case MARKET_REGIME_TRENDING_STRONG_DETAILED:
             // ใช้ TP ใหญ่, SL ใหญ่, lot ปกติ
-            CurrentTakeProfitPips = DefaultTakeProfitPips * 2;
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 2.0;
             CurrentStopLossPips = DefaultStopLossPips * 1.5;
             CurrentLotMultiplier = 1.0;
             break;
@@ -12717,12 +12742,54 @@ void AdjustStrategyParameters(ENUM_MARKET_REGIME_DETAILED currentRegime)
             CurrentLotMultiplier = 0.2;
             break;
             
+        case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
+            // เพิ่ม case นี้ถ้าต้องการ
+            CurrentTakeProfitPips = DefaultTakeProfitPips * 1.5;
+            CurrentStopLossPips = DefaultStopLossPips * 0.7;
+            CurrentLotMultiplier = 0.9;
+            break;
+            
+        case MARKET_REGIME_UNKNOWN_DETAILED:
         default:
             CurrentTakeProfitPips = DefaultTakeProfitPips;
             CurrentStopLossPips = DefaultStopLossPips;
             CurrentLotMultiplier = 1.0;
             break;
     }
+    
+    // แสดงการเปลี่ยนแปลง (optional)
+    if(oldTP != CurrentTakeProfitPips || oldSL != CurrentStopLossPips || oldLotMult != CurrentLotMultiplier)
+    {
+        Print("Parameters changed: TP=" + DoubleToString(oldTP,1) + "->" + DoubleToString(CurrentTakeProfitPips,1) + 
+              ", SL=" + DoubleToString(oldSL,1) + "->" + DoubleToString(CurrentStopLossPips,1) + 
+              ", LotMult=" + DoubleToString(oldLotMult,1) + "->" + DoubleToString(CurrentLotMultiplier,1));
+    }
+}
+double CalculateActualLotSize(double baseLotSize)
+{
+    // คำนวณ lot size จริงโดยคำนึงถึง multiplier
+    double actualLotSize = baseLotSize * CurrentLotMultiplier;
+    
+    // Normalize ตามข้อกำหนดของโบรกเกอร์
+    actualLotSize = NormalizeDouble(actualLotSize, 2);
+    
+    // ตรวจสอบค่า min/max lot
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    
+    if(actualLotSize < minLot) actualLotSize = minLot;
+    if(actualLotSize > maxLot) actualLotSize = maxLot;
+    
+    return actualLotSize;
+}
+
+// ฟังก์ชันแปลง pips เป็น price
+double PipsToPrice(double pips)
+{
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    
+    return pips * point * (10 / tickSize);  // ปรับตามโบรกเกอร์
 }
 // 2. ตรวจสอบว่าอนุญาตให้เทรดใน regime นี้หรือไม่
 bool IsTradingAllowedInRegime(ENUM_MARKET_REGIME_DETAILED currentRegime)
@@ -12775,16 +12842,195 @@ void ExecuteVolatileRangeStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
 void ExecuteSafeModeStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
 {
     Print("Executing Safe Mode Strategy");
-    // ใช้ lot น้อยมาก, SL สั้น, TP สั้น
-    // หรืออาจจะไม่เทรดเลย
-    if(AllowTradingInSafeMode)
+    
+    // ตรวจสอบ input parameters
+    if(Input_AllowSafeModeTrading)
     {
-        // เทรดแบบ conservative มาก
+        // ใช้ฟังก์ชันที่มีอยู่แล้ว เช่น ExecuteConservativeStrategy
         ExecuteConservativeStrategy(currentRegime);
     }
     else
     {
-        Print("Safe Mode: Trading disabled");
+        Print("Safe Mode: Trading disabled in input parameters");
+    }
+}
+// ประกาศฟังก์ชัน ExecuteConservativeTrendTrade
+void ExecuteConservativeTrendTrade(ENUM_MARKET_REGIME_DETAILED regime, 
+                                   double lotSize, 
+                                   double takeProfitPips, 
+                                   double stopLossPips)
+{
+    Print("Conservative Trend Trade - Lot: " + DoubleToString(lotSize, 3) + 
+          ", TP: " + DoubleToString(takeProfitPips, 1) + 
+          ", SL: " + DoubleToString(stopLossPips, 1));
+    
+    // ตรรกะการเทรดตามเทรนด์แบบ conservative
+    if(IsUptrend())
+    {
+        ExecuteBuyOrderConservative(lotSize, takeProfitPips, stopLossPips, "Conservative Trend Buy");
+    }
+    else if(IsDowntrend())
+    {
+        ExecuteSellOrderConservative(lotSize, takeProfitPips, stopLossPips, "Conservative Trend Sell");
+    }
+    else
+    {
+        Print("No clear trend for conservative trend trading");
+    }
+}
+void ExecuteBuyOrderConservative(double lotSize, double takeProfitPips, double stopLossPips, string comment)
+{
+    Print("Conservative Buy Order: " + comment);
+    
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double ppointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double tpPrice = price + (takeProfitPips * ppointValue * 10);
+    double slPrice = price - (stopLossPips * ppointValue * 10);
+    
+    // วิธีที่ 1: แบบง่าย
+    Print("Buy at ", DoubleToString(price, 5), 
+          ", TP: ", DoubleToString(tpPrice, 5), 
+          ", SL: ", DoubleToString(slPrice, 5));
+}
+
+void ExecuteSellOrderConservative(double lotSize, double takeProfitPips, double stopLossPips, string comment)
+{
+    Print("Conservative Sell Order: " + comment);
+    
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ppointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double tpPrice = price - (takeProfitPips * ppointValue * 10);
+    double slPrice = price + (stopLossPips * ppointValue * 10);
+    
+    // วิธีที่ 1: แบบง่าย
+    Print("Sell at ", DoubleToString(price, 5), 
+          ", TP: ", DoubleToString(tpPrice, 5), 
+          ", SL: ", DoubleToString(slPrice, 5));
+}
+// ประกาศฟังก์ชัน ExecuteConservativeRangeTrade
+void ExecuteConservativeRangeTrade(ENUM_MARKET_REGIME_DETAILED regime,
+                                   double lotSize,
+                                   double takeProfitPips,
+                                   double stopLossPips)
+{
+    Print("Conservative Range Trade - Lot: " + DoubleToString(lotSize, 3) + 
+          ", TP: " + DoubleToString(takeProfitPips, 1) + 
+          ", SL: " + DoubleToString(stopLossPips, 1));
+    
+    // ตรรกะ range trading แบบ conservative
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double support = FindSupportLevel();
+    double resistance = FindResistanceLevel();
+    
+    if(currentPrice <= support * 1.005)  // ใกล้ support (+0.5%)
+    {
+        ExecuteBuyOrderConservative(lotSize, takeProfitPips, stopLossPips, "Conservative Range Buy");
+    }
+    else if(currentPrice >= resistance * 0.995)  // ใกล้ resistance (-0.5%)
+    {
+        ExecuteSellOrderConservative(lotSize, takeProfitPips, stopLossPips, "Conservative Range Sell");
+    }
+    else
+    {
+        Print("Price not at range boundaries for conservative range trading");
+    }
+}
+
+// ประกาศฟังก์ชัน ExecuteConservativeWeakTrendTrade
+void ExecuteConservativeWeakTrendTrade(ENUM_MARKET_REGIME_DETAILED regime,
+                                       double lotSize,
+                                       double takeProfitPips,
+                                       double stopLossPips)
+{
+    Print("Conservative Weak Trend Trade - Lot: " + DoubleToString(lotSize, 3) + 
+          ", TP: " + DoubleToString(takeProfitPips, 1) + 
+          ", SL: " + DoubleToString(stopLossPips, 1));
+    
+    // สำหรับเทรนด์อ่อน ใช้ lot น้อยลงและเงื่อนไขเข้มงวดกว่า
+    double extraConservativeLot = lotSize * 0.7;  // ลดลงอีก 30%
+    
+    // ต้องการ confirmation ที่มากขึ้นสำหรับเทรนด์อ่อน
+    if(IsWeakUptrendConfirmed())
+    {
+        ExecuteBuyOrderConservative(extraConservativeLot, takeProfitPips, stopLossPips, "Conservative Weak Trend Buy");
+    }
+    else if(IsWeakDowntrendConfirmed())
+    {
+        ExecuteSellOrderConservative(extraConservativeLot, takeProfitPips, stopLossPips, "Conservative Weak Trend Sell");
+    }
+    else
+    {
+        Print("No confirmed weak trend for conservative trading");
+    }
+}
+void ExecuteConservativeStrategy(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("Executing Conservative Strategy for regime: " + RegimeToString(regime));
+    
+    // ตั้งค่าแบบ conservative (ปลอดภัยสูง)
+    double conservativeLotMultiplier = 0.3;  // ใช้แค่ 30% ของ lot ปกติ
+    double conservativeTPMultiplier = 0.5;   // TP 50% ของปกติ
+    double conservativeSLMultiplier = 0.7;   // SL 70% ของปกติ
+    
+    // คำนวณค่า conservative
+    double safeLotSize = CalculateSafeLotSize(conservativeLotMultiplier);
+    double safeTakeProfit = CurrentTakeProfitPips * conservativeTPMultiplier;
+    double safeStopLoss = CurrentStopLossPips * conservativeSLMultiplier;
+    
+    // ตรรกะการเทรดแบบ conservative
+    switch(regime)
+    {
+        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+            ExecuteConservativeTrendTrade(regime, safeLotSize, safeTakeProfit, safeStopLoss);
+            break;
+            
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+            ExecuteConservativeRangeTrade(regime, safeLotSize, safeTakeProfit, safeStopLoss);
+            break;
+            
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+            ExecuteConservativeWeakTrendTrade(regime, safeLotSize, safeTakeProfit, safeStopLoss);
+            break;
+            
+        default:
+            Print("Conservative trading not recommended for regime: " + RegimeToString(regime));
+            break;
+    }
+}
+//=================Help=================//
+
+double CalculateSafeLotSize(double multiplier)
+{
+    double baseLot = 0.01;  // หรือ DefaultLotSize ถ้ามี
+    double safeLot = baseLot * multiplier;
+    
+    // Normalize และตรวจสอบขีดจำกัด
+    safeLot = NormalizeDouble(safeLot, 2);
+    
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    
+    if(safeLot < minLot) safeLot = minLot;
+    if(safeLot > maxLot) safeLot = maxLot;
+    
+    return safeLot;
+}
+
+bool IsRegimeSafeForConservativeTrading(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    // อนุญาตเฉพาะ regime ที่ปลอดภัยเท่านั้น
+    switch(regime)
+    {
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+            return true;
+            
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+        default:
+            return false;
     }
 }
 
@@ -12793,7 +13039,7 @@ void ExecuteNewsEventStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
 {
     Print("Executing News Event Strategy");
     // อาจจะไม่เทรด หรือรอให้ volatility ลดลง
-    if(AllowNewsTrading)
+    if(Input_AllowNewsTrading)
     {
         ExecuteNewsTrading(currentRegime);
     }
@@ -12802,6 +13048,122 @@ void ExecuteNewsEventStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
         Print("News Trading disabled");
     }
 }
+void ExecuteNewsTrading(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("Executing News Trading Strategy for regime: " + RegimeToString(regime));
+    
+    // ตั้งค่าเฉพาะสำหรับการเทรดช่วงข่าว
+    double newsLotMultiplier = 0.2;      // ใช้แค่ 20% ของ lot ปกติ
+    double newsTPMultiplier = 0.4;       // TP 40% ของปกติ
+    double newsSLMultiplier = 0.4;       // SL 40% ของปกติ
+    
+    // คำนวณค่า
+    double newsLotSize = CalculateSafeLotSize(newsLotMultiplier);
+    double newsTakeProfit = CurrentTakeProfitPips * newsTPMultiplier;
+    double newsStopLoss = CurrentStopLossPips * newsSLMultiplier;
+    
+    // ตรรกะการเทรดช่วงข่าว
+    switch(regime)
+    {
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            ExecuteHighImpactNewsTrading(newsLotSize, newsTakeProfit, newsStopLoss);
+            break;
+            
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+            ExecuteVolatileNewsTrading(newsLotSize, newsTakeProfit, newsStopLoss);
+            break;
+            
+        default:
+            Print("News trading not suitable for current regime: " + RegimeToString(regime));
+            break;
+    }
+}
+//=================Trade News===================//
+// การเทรดช่วงข่าวผลกระทบสูง
+void ExecuteHighImpactNewsTrading(double lotSize, double takeProfitPips, double stopLossPips)
+{
+    Print("High Impact News Trading - Lot: " + DoubleToString(lotSize, 3));
+    
+    // รอให้ volatility คงที่ก่อน (post-news consolidation)
+    if(IsMarketStabilizedAfterNews())
+    {
+        // เทรดตามทิศทางที่ข่าวกำหนด
+        if(GetNewsDirection() == "BULLISH")
+        {
+            ExecuteNewsBuy(lotSize, takeProfitPips, stopLossPips, "Post-News Bullish");
+        }
+        else if(GetNewsDirection() == "BEARISH")
+        {
+            ExecuteNewsSell(lotSize, takeProfitPips, stopLossPips, "Post-News Bearish");
+        }
+        else
+        {
+            Print("No clear news direction, skipping trade");
+        }
+    }
+    else
+    {
+        Print("Market still volatile after news, waiting...");
+    }
+}
+
+// การเทรดในช่วง volatility สูง
+void ExecuteVolatileNewsTrading(double lotSize, double takeProfitPips, double stopLossPips)
+{
+    Print("Volatile News Trading - Lot: " + DoubleToString(lotSize, 3));
+    
+    // ใช้ smaller timeframes และ tighter stops
+    double volatileLot = lotSize * 0.5;  // ลดลงอีกครึ่งหนึ่ง
+    double volatileTP = takeProfitPips * 0.8;
+    double volatileSL = stopLossPips * 0.8;
+    
+    // Breakout trading หลังข่าว
+    ExecuteNewsBreakoutStrategy(volatileLot, volatileTP, volatileSL);
+}
+
+// ฟังก์ชันตรวจสอบว่าตลาดเสถียรหลังข่าวแล้วหรือยัง
+// ต้องประกาศฟังก์ชันเหล่านี้ถ้ายังไม่มี
+
+
+// ฟังก์ชันตรวจสอบ market stabilization
+bool IsMarketStabilizedAfterNews()
+{
+    // ตรรกะตรวจสอบ volatility
+    // ใช้ ATR ช่วงสั้น (5 ใหม่ล่าสุด) และ ATR ช่วงยาว (50 ใหม่ล่าสุด) เป็นปกติ
+    double currentATR = GetATRValue(_Symbol, PERIOD_M5, 14, 0);      // ATR ปัจจุบัน (5-minute)
+    double normalATR = GetATRValue(_Symbol, PERIOD_H1, 14, 0);      // ATR ปกติ (1-hour)
+    
+    // ถ้า ATR ปัจจุบันไม่เกิน 150% ของ ATR ปกติ
+    return (currentATR <= normalATR * 1.5);
+}
+// ฟังก์ชันได้ทิศทางจากข่าว (ตัวอย่าง)
+string GetNewsDirection()
+{
+    // ตรรกะวิเคราะห์ทิศทางข่าว
+    // อาจมาจากการประมวลผลข่าว หรือ external data feed
+    return "NEUTRAL";  // ตัวอย่าง
+}
+
+// ฟังก์ชันเทรดหลังข่าว
+void ExecuteNewsBuy(double lotSize, double takeProfitPips, double stopLossPips, string comment)
+{
+    Print("News Buy: " + comment);
+    // ส่งคำสั่งซื้อ...
+}
+
+void ExecuteNewsSell(double lotSize, double takeProfitPips, double stopLossPips, string comment)
+{
+    Print("News Sell: " + comment);
+    // ส่งคำสั่งขาย...
+}
+
+// กลยุทธ์ breakout หลังข่าว
+void ExecuteNewsBreakoutStrategy(double lotSize, double takeProfitPips, double stopLossPips)
+{
+    Print("News Breakout Strategy");
+    // ตรรกะ breakout trading...
+}
+//============Trade News =======================//
 
 // 9. Default Strategy
 void ExecuteDefaultStrategy(ENUM_MARKET_REGIME_DETAILED currentRegime)
@@ -12830,7 +13192,869 @@ void RecordStrategyExecution(ENUM_MARKET_REGIME_DETAILED currentRegime)
                    RegimeToString(currentRegime) + " strategy";
     Print(record);
 }
+double CalculateLotSize() {
+    // ฟังก์ชันคำนวณ lot size - ควรมีอยู่แล้ว
+    return BaseLot; // หรือใช้โลจิกที่ซับซ้อนกว่า
+}
+void ExecuteWeakTrendStrategy(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("Executing Weak Trend Strategy for regime: " + RegimeToString(regime));
+    
+    // ตั้งค่าสำหรับเทรนด์อ่อน
+    double weakTrendRiskMultiplier = 0.6;    // ความเสี่ยง 60% ของปกติ
+    double weakTrendTPMultiplier = 0.8;      // TP 80% ของปกติ
+    double weakTrendSLMultiplier = 0.9;      // SL 90% ของปกติ
+    
+    // คำนวณค่าต่างๆ
+    double lotSize = CalculateLotSize() * weakTrendRiskMultiplier;
+    double takeProfitPips = CurrentTakeProfitPips * weakTrendTPMultiplier;
+    double stopLossPips = CurrentStopLossPips * weakTrendSLMultiplier;
+    
+    // ตรรกะการเทรดเทรนด์อ่อน
+    if(IsWeakUptrend())
+    {
+        ExecuteWeakTrendBuy(lotSize, takeProfitPips, stopLossPips, regime);
+    }
+    else if(IsWeakDowntrend())
+    {
+        ExecuteWeakTrendSell(lotSize, takeProfitPips, stopLossPips, regime);
+    }
+    else
+    {
+        Print("No clear weak trend direction detected");
+    }
+}
+bool IsWeakBuySignalConfirmed() {
+    // ตรวจสอบ confirmation สำหรับ buy signal
+    // ตัวอย่าง: ใช้ RSI, Stochastic, หรือ indicator อื่น
+    double rrsi = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+    return (rrsi > 50 && rrsi < 65); // ตัวอย่างเงื่อนไข
+}
 
+bool IsWeakSellSignalConfirmed() {
+    double rrsi = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+    return (rrsi < 50 && rrsi > 35); // ตัวอย่างเงื่อนไข
+}
+// ฟังก์ชันส่งออร์เดอร์ (ต้องมี)
+void SendBuyOrder(double lot, double tpPrice, double slPrice, string comment) {
+    // โลจิกส่งออร์เดอร์ Buy
+    Print("Sending Buy Order: Lot=", lot, ", TP=", tpPrice, ", SL=", slPrice);
+}
+
+void SendSellOrder(double lot, double tpPrice, double slPrice, string comment) {
+    // โลจิกส่งออร์เดอร์ Sell
+    Print("Sending Sell Order: Lot=", lot, ", TP=", tpPrice, ", SL=", slPrice);
+}
+// ฟังก์ชันย่อยสำหรับ Weak Trend
+void ExecuteWeakTrendBuy(double lotSize, double takeProfitPips, double stopLossPips, ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("Weak Trend Buy - Lot: " + DoubleToString(lotSize, 3) + 
+          ", TP: " + DoubleToString(takeProfitPips, 1) + 
+          ", SL: " + DoubleToString(stopLossPips, 1));
+    
+    // ต้องการ confirmation มากขึ้นสำหรับเทรนด์อ่อน
+    if(IsWeakBuySignalConfirmed())
+    {
+        double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        
+        // ใช้ฟังก์ชันช่วยแปลง
+        double tpPrice = price + PipsToPrice(takeProfitPips);
+        double slPrice = price - PipsToPrice(stopLossPips);
+        
+        // ส่งคำสั่งซื้อ
+        SendBuyOrder(lotSize, tpPrice, slPrice, "Weak Trend Buy");
+    }
+    else
+    {
+        Print("Weak trend buy signal not confirmed");
+    }
+}
+
+// ในฟังก์ชัน ExecuteWeakTrendSell (บรรทัด 13255-13280)
+void ExecuteWeakTrendSell(double lotSize, double takeProfitPips, double stopLossPips, ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("Weak Trend Sell - Lot: " + DoubleToString(lotSize, 3) + 
+          ", TP: " + DoubleToString(takeProfitPips, 1) + 
+          ", SL: " + DoubleToString(stopLossPips, 1));
+    
+    if(IsWeakSellSignalConfirmed())
+    {
+        double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        double ppointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+        
+        // แก้ syntax: แยกการคำนวณให้ชัดเจน
+        double tpDistance = takeProfitPips * ppointValue * 10;
+        double slDistance = stopLossPips * ppointValue * 10;
+        
+        double tpPrice = price - tpDistance;
+        double slPrice = price + slDistance;
+        
+        // ส่งคำสั่งขาย
+        SendSellOrder(lotSize, tpPrice, slPrice, "Weak Trend Sell");
+    }
+    else
+    {
+        Print("Weak trend sell signal not confirmed");
+    }
+}
+
+// ฟังก์ชันตรวจสอบเทรนด์อ่อน
+bool IsWeakUptrend()
+{
+    // ใช้หลาย indicators สำหรับ confirmation
+    // แก้ไข: เพิ่มพารามิเตอร์สุดท้าย (applied_price) ให้ครบ 7 ตัว
+    double maFast = iMA(_Symbol, PERIOD_H1, 10, 0, MODE_SMA, PRICE_CLOSE);
+    double maMedium = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);
+    double maSlow = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_SMA, PRICE_CLOSE);
+    
+    double rsi0 = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+    
+    // เงื่อนไข: MA เรียงลำดับขึ้นแต่ slope ไม่ชัน + RSI ไม่ overbought
+    bool maCondition = (maFast > maMedium && maMedium > maSlow);
+    bool rsiCondition = (rsi0 > 50 && rsi0 < 65);  // bullish แต่ไม่ร้อนแรงเกิน
+    
+    return (maCondition && rsiCondition);
+}
+
+bool IsWeakDowntrend()
+{
+    // แก้ไขเช่นเดียวกัน: เพิ่มพารามิเตอร์สุดท้ายให้ครบ
+    double maFast = iMA(_Symbol, PERIOD_H1, 10, 0, MODE_SMA, PRICE_CLOSE);
+    double maMedium = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);
+    double maSlow = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_SMA, PRICE_CLOSE);
+    
+    double rsi0 = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+    
+    bool maCondition = (maFast < maMedium && maMedium < maSlow);
+    bool rsiCondition = (rsi0 < 50 && rsi0 > 35);  // bearish แต่ไม่ oversold เกิน
+    
+    return (maCondition && rsiCondition);
+}
+
+
+
+void ExecuteHighVolatilityStrategy(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("Executing High Volatility Strategy for regime: " + RegimeToString(regime));
+    
+    // ตั้งค่าสำหรับ high volatility
+    double highVolRiskMultiplier = 0.3;     // ความเสี่ยงต่ำมาก 30%
+    double highVolTPMultiplier = 0.4;       // TP สั้น 40%
+    double highVolSLMultiplier = 0.5;       // SL สั้น 50%
+    
+    // ตรรกะการเทรดในช่วง volatility สูง
+    switch(regime)
+    {
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+            ExecutePureHighVolatilityTrading(highVolRiskMultiplier, highVolTPMultiplier, highVolSLMultiplier);
+            break;
+            
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            ExecuteNewsVolatilityTrading(highVolRiskMultiplier * 0.5, highVolTPMultiplier, highVolSLMultiplier);
+            break;
+            
+        default:
+            Print("High volatility strategy not suitable for current regime");
+            break;
+    }
+}
+
+
+bool IsBreakoutDirectionUp()
+{
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double resistance = GetResistanceLevel();
+    
+    // ราคา break ผ่าน resistance ขึ้นไป
+    return (currentPrice > resistance);
+}
+bool IsBreakoutDirectionDown()
+{
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double support = GetSupportLevel();
+    
+    // ราคา break ผ่าน support ลงมา
+    return (currentPrice < support);
+}
+// ฟังก์ชันสำหรับ mean reversion
+bool ShouldBuyMeanReversion()
+{
+    double rrsi = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+    bool oversold = (rrsi < 30);
+    
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double support = GetSupportLevel();
+    bool nearSupport = (price <= support * 1.005);
+    
+    return (oversold && nearSupport);
+}
+
+bool ShouldSellMeanReversion()
+{
+    double rrsi = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+    bool overbought = (rrsi > 70);
+    
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double resistance = GetResistanceLevel();
+    bool nearResistance = (price >= resistance * 0.995);
+    
+    return (overbought && nearResistance);
+}
+
+// ฟังก์ชัน Execute ต่างๆ
+void ExecuteBreakoutBuy(double lotSize, double tpPips, double slPips)
+{
+    Print("Breakout Buy: Lot=" + DoubleToString(lotSize, 3));
+    // ตรรกะส่งคำสั่งซื้อ...
+}
+
+void ExecuteBreakoutSell(double lotSize, double tpPips, double slPips)
+{
+    Print("Breakout Sell: Lot=" + DoubleToString(lotSize, 3));
+    // ตรรกะส่งคำสั่งขาย...
+}
+
+void ExecuteMeanReversionBuy(double lotSize, double tpPips, double slPips)
+{
+    Print("Mean Reversion Buy: Lot=" + DoubleToString(lotSize, 3));
+    // ตรรกะส่งคำสั่งซื้อ...
+}
+
+void ExecuteMeanReversionSell(double lotSize, double tpPips, double slPips)
+{
+    Print("Mean Reversion Sell: Lot=" + DoubleToString(lotSize, 3));
+    // ตรรกะส่งคำสั่งขาย...
+}
+// ฟังก์ชัน ExecuteHighVolBreakout
+void ExecuteHighVolBreakout(double riskMultiplier, double tpMultiplier, double slMultiplier)
+{
+    Print("Executing High Vol Breakout - Risk: " + DoubleToString(riskMultiplier, 2));
+    
+    // คำนวณ lot size
+    double baseLot = CalculateLotSize();
+    double lotSize = baseLot * riskMultiplier;
+    
+    // คำนวณ TP/SL
+    double tpPips = CurrentTakeProfitPips * tpMultiplier;
+    double slPips = CurrentStopLossPips * slMultiplier;
+    
+    // ตรรกะ breakout trading
+    if(IsBreakoutDirectionUp())
+    {
+        ExecuteBreakoutBuy(lotSize, tpPips, slPips);
+    }
+    else if(IsBreakoutDirectionDown())
+    {
+        ExecuteBreakoutSell(lotSize, tpPips, slPips);
+    }
+}
+
+// ฟังก์ชัน ExecuteHighVolMeanReversion
+void ExecuteHighVolMeanReversion(double riskMultiplier, double tpMultiplier, double slMultiplier)
+{
+    Print("Executing High Vol Mean Reversion - Risk: " + DoubleToString(riskMultiplier, 2));
+    
+    double baseLot = CalculateLotSize();
+    double lotSize = baseLot * riskMultiplier * 0.7; // ลด lot ลงใน mean reversion
+    
+    double tpPips = CurrentTakeProfitPips * tpMultiplier;
+    double slPips = CurrentStopLossPips * slMultiplier;
+    
+    // ตรรกะ mean reversion
+    if(ShouldBuyMeanReversion())
+    {
+        ExecuteMeanReversionBuy(lotSize, tpPips, slPips);
+    }
+    else if(ShouldSellMeanReversion())
+    {
+        ExecuteMeanReversionSell(lotSize, tpPips, slPips);
+    }
+}
+void ExecutePureHighVolatilityTrading(double riskMultiplier, double tpMultiplier, double slMultiplier)
+{
+    Print("Pure High Volatility Trading");
+    
+    // ใช้กลยุทธ์ breakout หรือ mean reversion ในช่วง volatile
+    if(ShouldTradeBreakoutInHighVol())
+    {
+        ExecuteHighVolBreakout(riskMultiplier, tpMultiplier, slMultiplier);
+    }
+    else if(ShouldTradeMeanReversionInHighVol())
+    {
+        ExecuteHighVolMeanReversion(riskMultiplier, tpMultiplier, slMultiplier);
+    }
+    else
+    {
+        Print("No clear signal in high volatility - staying out");
+    }
+}
+void ExecutePostNewsTrading(double riskMult, double tpMult, double slMult) {
+    Print("Executing Post-News Trading");
+    // โลจิกเทรดหลังข่าว
+}
+
+
+void ExecuteNewsVolatilityTrading(double riskMultiplier, double tpMultiplier, double slMultiplier)
+{
+    Print("News Volatility Trading - Risk: " + DoubleToString(riskMultiplier, 2));
+    
+    // รอให้ตลาด stabilizes ก่อน
+    if(IsMarketStabilizedAfterNews())
+    {
+        // เทรดหลังข่าว
+        ExecutePostNewsTrading(riskMultiplier * 1.5, tpMultiplier, slMultiplier);
+    }
+    else
+    {
+        Print("Market still too volatile after news - waiting");
+    }
+}
+
+bool ShouldTradeBreakoutInHighVol()
+{
+    // ตรวจสอบ breakout ในช่วง volatile
+    double atr0 = GetATRValue(_Symbol, PERIOD_M15, 14, 0);
+    double normalATR = GetATRValue(_Symbol, PERIOD_H1, 14, 0);
+    
+    // ถ้า volatility สูงกว่า 200% ของปกติ
+    bool highVolCondition = (atr0 > normalATR * 2.0);
+    
+    // ตรวจสอบ price action
+    bool priceCondition = IsPriceAtKeyLevel() && IsVolumeSpiking();
+    
+    return (highVolCondition && priceCondition);
+}
+bool IsPriceAtKeyLevel() {
+    // ตรวจสอบว่าราคาอยู่ที่ระดับเทคนิคสำคัญ
+    return true; // ตัวอย่าง
+}
+
+bool IsVolumeSpiking() {
+    // ตรวจสอบ volume spike
+    long currVol = iVolume(_Symbol, PERIOD_M15, 0);
+    long prevVol = iVolume(_Symbol, PERIOD_M15, 1);
+    return (currVol > prevVol * 1.5);
+}
+// --- ฟังก์ชันช่วยเหลือสำหรับ Range Trading ---
+
+// ระดับ support/resistance ทั่วไป
+double GetGeneralSupportLevel()
+{
+    // ใช้ pivot points หรือ recent lows
+    double pivot = (iHigh(_Symbol, PERIOD_D1, 1) + iLow(_Symbol, PERIOD_D1, 1) + iClose(_Symbol, PERIOD_D1, 1)) / 3;
+    double s1 = (pivot * 2) - iHigh(_Symbol, PERIOD_D1, 1);
+    return s1;
+}
+
+double GetGeneralResistanceLevel()
+{
+    double pivot = (iHigh(_Symbol, PERIOD_D1, 1) + iLow(_Symbol, PERIOD_D1, 1) + iClose(_Symbol, PERIOD_D1, 1)) / 3;
+    double r1 = (pivot * 2) - iLow(_Symbol, PERIOD_D1, 1);
+    return r1;
+}
+
+
+
+// ระดับ support/resistance แบบ dynamic
+double GetDynamicSupportLevel()
+{
+    // วิธีที่สั้นกว่าแต่ต้องรู้ buffer indices
+    int bbHandle = iBands(_Symbol, PERIOD_H1, 20, 2.0, 0, PRICE_CLOSE);
+    if(bbHandle == INVALID_HANDLE) return 0;
+    
+    // ประกาศ array 1D แยกกัน
+    double bbMiddle[1];  // Buffer 0 = middle line
+    double bbUpper[1];   // Buffer 1 = upper band
+    double bbLower[1];   // Buffer 2 = lower band
+    
+    // ดึงค่าทั้งสาม buffer พร้อมกัน
+    bool success = (CopyBuffer(bbHandle, 0, 0, 1, bbMiddle) > 0 &&
+                   CopyBuffer(bbHandle, 1, 0, 1, bbUpper) > 0 &&
+                   CopyBuffer(bbHandle, 2, 0, 1, bbLower) > 0);
+    
+    IndicatorRelease(bbHandle);
+    
+    if(!success) return 0;
+    
+    double recentLow = iLow(_Symbol, PERIOD_H1, iLowest(_Symbol, PERIOD_H1, MODE_LOW, 10, 0));
+    return MathMin(bbLower[0], recentLow);
+}
+
+// ฟังก์ชันตรวจสอบ volume
+bool IsVolumeLowToModerate()
+{
+    long currentVol = iVolume(_Symbol, PERIOD_H1, 0);
+    long avgVol = 0;
+    for(int i = 1; i <= 10; i++) {
+        avgVol += iVolume(_Symbol, PERIOD_H1, i);
+    }
+    avgVol /= 10;
+    
+    return (currentVol <= avgVol * 1.5);
+}
+
+bool IsVolumeModerate()
+{
+    long currentVol = iVolume(_Symbol, PERIOD_H1, 0);
+    long avgVol = 0;
+    for(int i = 1; i <= 20; i++) {
+        avgVol += iVolume(_Symbol, PERIOD_H1, i);
+    }
+    avgVol /= 20;
+    
+    return (currentVol >= avgVol * 0.7 && currentVol <= avgVol * 1.5);
+}
+
+bool IsVolumeDecreasing(ENUM_TIMEFRAMES tf, int bars)
+{
+    bool decreasing = true;
+    long prevVolume = iVolume(_Symbol, tf, 0);
+    
+    for(int i = 1; i < bars; i++) {
+        long currentVolume = iVolume(_Symbol, tf, i);
+        if(currentVolume > prevVolume) {
+            decreasing = false;
+            break;
+        }
+        prevVolume = currentVolume;
+    }
+    
+    return decreasing;
+}
+
+// ฟังก์ชันตรวจสอบ price ใน channel
+bool IsPriceInChannel(double price, double upper, double lower)
+{
+    return (price >= MathMin(upper, lower) && price <= MathMax(upper, lower));
+}
+
+// ฟังก์ชันตรวจสอบ oscillation
+bool IsPriceOscillatingBetweenMAs()
+{
+    int crossCount = 0;
+    for(int i = 0; i < 20; i++) {
+        double price = iClose(_Symbol, PERIOD_H1, i);
+        double maFast = GetMAValue(_Symbol, PERIOD_H1, 20, i);
+        double maSlow = GetMAValue(_Symbol, PERIOD_H1, 50, i);
+        
+        double pricePrev = iClose(_Symbol, PERIOD_H1, i+1);
+        double maFastPrev = GetMAValue(_Symbol, PERIOD_H1, 20, i+1);
+        double maSlowPrev = GetMAValue(_Symbol, PERIOD_H1, 50, i+1);
+        
+        // ตรวจสอบการข้ามเส้น MA
+        if((price > maFast && pricePrev <= maFastPrev) || 
+           (price < maFast && pricePrev >= maFastPrev)) {
+            crossCount++;
+        }
+    }
+    
+    return (crossCount >= 3); // ข้ามเส้นอย่างน้อย 3 ครั้งใน 20 candles
+}
+
+// ฟังก์ชันดึงค่า MA (ต้องมีอยู่แล้ว)
+double GetMAValue(string symbol, ENUM_TIMEFRAMES tf, int period, int shift)
+{
+    int handle = iMA(symbol, tf, period, 0, MODE_SMA, PRICE_CLOSE);
+    if(handle == INVALID_HANDLE) return 0;
+    
+    double value[1];
+    int copied = CopyBuffer(handle, 0, shift, 1, value);
+    IndicatorRelease(handle);
+    
+    return (copied > 0) ? value[0] : 0;
+}
+
+
+
+// ฟังก์ชันตรวจสอบ reversal pattern
+bool IsReversalCandlePattern()
+{
+    // ตรวจสอบ candle patterns เช่น doji, hammer, shooting star
+    double open = iOpen(_Symbol, PERIOD_M15, 0);
+    double close = iClose(_Symbol, PERIOD_M15, 0);
+    double high = iHigh(_Symbol, PERIOD_M15, 0);
+    double low = iLow(_Symbol, PERIOD_M15, 0);
+    
+    // ตรวจสอบค่า validity
+    if(open == 0 || close == 0 || high == 0 || low == 0) return false;
+    
+    double bodySize = MathAbs(close - open);
+    double upperShadow = high - MathMax(open, close);
+    double lowerShadow = MathMin(open, close) - low;
+    double totalRange = high - low;
+    
+    // ตรวจสอบ totalRange > 0
+    if(totalRange <= 0) return false;
+    
+    // Doji pattern (body size น้อยมาก)
+    bool isDoji = (bodySize <= totalRange * 0.1);
+    
+    // Hammer pattern (lower shadow ยาว, body อยู่ช่วงบน)
+    // แก้ไข: เอาส่วนที่เป็นตัวเลขออก (close > open ? (close - open) : (open - close))
+    // แทนที่ด้วยการตรวจสอบว่า body เป็น bullish หรือไม่
+    bool bodyIsBullish = (close > open);
+    double bodyAbsoluteSize = MathAbs(close - open);
+    
+    bool isHammer = (lowerShadow >= bodyAbsoluteSize * 2.0 && 
+                    bodyAbsoluteSize > 0 && 
+                    bodyIsBullish && 
+                    upperShadow <= bodyAbsoluteSize * 0.3);
+    
+    // Shooting star pattern (upper shadow ยาว, body อยู่ช่วงล่าง)
+    bool bodyIsBearish = (close < open);
+    
+    bool isShootingStar = (upperShadow >= bodyAbsoluteSize * 2.0 && 
+                          bodyAbsoluteSize > 0 && 
+                          bodyIsBearish && 
+                          lowerShadow <= bodyAbsoluteSize * 0.3);
+    
+    return (isDoji || isHammer || isShootingStar);
+}
+// ฟังก์ชันตรวจสอบ momentum
+bool IsStrongMomentumPresent()
+{
+    // ใช้ iADX() รุ่นเก่า (3 parameters)
+    int adxHandle = iADX(_Symbol, PERIOD_H1, 14);
+    if(adxHandle == INVALID_HANDLE) return false;
+    
+    double adxValue[1];      // Buffer 0 = ADX Main
+    double plusDIValue[1];   // Buffer 1 = +DI
+    double minusDIValue[1];  // Buffer 2 = -DI
+    
+    bool success = (CopyBuffer(adxHandle, 0, 0, 1, adxValue) > 0 &&
+                   CopyBuffer(adxHandle, 1, 0, 1, plusDIValue) > 0 &&
+                   CopyBuffer(adxHandle, 2, 0, 1, minusDIValue) > 0);
+    
+    IndicatorRelease(adxHandle);
+    
+    if(!success) return false;
+    
+    // ADX > 25 และมี gap ระหว่าง +DI/-DI
+    return (adxValue[0] > 25 && MathAbs(plusDIValue[0] - minusDIValue[0]) > 10);
+}
+bool GetADXValue(string symbol, ENUM_TIMEFRAMES tf, int period, 
+                 double &adx, double &plusDI, double &minusDI, int shift = 0)
+{
+    // ใช้ iADX() ด้วย 3 parameters เท่านั้น
+    int handle = iADX(symbol, tf, period);
+    
+    if(handle == INVALID_HANDLE) {
+        Print("Failed to create ADX indicator");
+        return false;
+    }
+    
+    double adxBuf[1], plusBuf[1], minusBuf[1];
+    bool success = (CopyBuffer(handle, 0, shift, 1, adxBuf) > 0 &&
+                   CopyBuffer(handle, 1, shift, 1, plusBuf) > 0 &&
+                   CopyBuffer(handle, 2, shift, 1, minusBuf) > 0);
+    
+    IndicatorRelease(handle);
+    
+    if(success) {
+        adx = adxBuf[0];
+        plusDI = plusBuf[0];
+        minusDI = minusBuf[0];
+        return true;
+    }
+    
+    return false;
+}
+
+
+bool DetectGeneralRangeOpportunity()
+{
+    // Range trading โอกาสทั่วไป สำหรับ regime อื่นๆ
+    double support = GetGeneralSupportLevel();
+    double resistance = GetGeneralResistanceLevel();
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // ตรวจสอบว่ามี range ที่ชัดเจนหรือไม่
+    if(support <= 0 || resistance <= support) return false;
+    
+    double rangeWidthPercent = ((resistance - support) / support) * 100;
+    bool hasValidRange = (rangeWidthPercent >= 0.3); // อย่างน้อย 0.3%
+    
+    // ตรวจสอบว่าราคาอยู่ใกล้ขอบ range
+    bool nearSupport = (currentPrice <= support * 1.01);     // ภายใน 1%
+    bool nearResistance = (currentPrice >= resistance * 0.99); // ภายใน 1%
+    
+    // ตรวจสอบ momentum (ไม่ควรมี momentum แข็ง)
+    // ใช้ iADX() 3 parameters + CopyBuffer
+    int adxHandle = iADX(_Symbol, PERIOD_H1, 14);  // 3 parameters
+    double adxValue = 0;
+    bool lowMomentum = true; // default true
+    
+    if(adxHandle != INVALID_HANDLE) {
+        double adxBuffer[1];
+        if(CopyBuffer(adxHandle, 0, 0, 1, adxBuffer) > 0) {
+            adxValue = adxBuffer[0];
+            lowMomentum = (adxValue < 25); // ADX ต่ำแสดงไม่มีเทรนด์ชัด
+        }
+        IndicatorRelease(adxHandle);
+    }
+    
+    // ตรวจสอบ volume (ควรปานกลางถึงต่ำ)
+    bool moderateVolume = IsVolumeModerate();
+    
+    return ((nearSupport || nearResistance) && hasValidRange && lowMomentum && moderateVolume);
+}
+bool DetectRangeTradingOpportunity(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    // ตรวจสอบว่าเหมาะสมสำหรับ range trading หรือไม่
+    if(!IsRegimeSuitableForRangeTrading(regime))
+    {
+        return false;
+    }
+    
+    // ตรวจสอบเงื่อนไข range trading
+    bool rangeConditionsMet = false;
+    
+    switch(regime)
+    {
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+            rangeConditionsMet = DetectCalmRangeOpportunity();
+            break;
+            
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            rangeConditionsMet = DetectVolatileRangeOpportunity();
+            break;
+            
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+            rangeConditionsMet = DetectWeakTrendRangeOpportunity();
+            break;
+            
+        default:
+            // สำหรับ regime อื่นๆ อาจมีโอกาส range trading บางครั้ง
+            rangeConditionsMet = DetectGeneralRangeOpportunity();
+            break;
+    }
+    
+    return rangeConditionsMet;
+}
+
+bool IsRegimeSuitableForRangeTrading(ENUM_MARKET_REGIME_DETAILED regime)
+{
+    // ตรวจสอบว่า regime นี้เหมาะสำหรับ range trading หรือไม่
+    switch(regime)
+    {
+        case MARKET_REGIME_RANGING_CALM_DETAILED:
+        case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
+            return true;
+            
+        case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+        case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
+            return true;  // อาจมีโอกาส range trading ในบางเงื่อนไข
+            
+        case MARKET_REGIME_TRENDING_STRONG_DETAILED:
+        case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+        case MARKET_REGIME_NEWS_EVENT_DETAILED:
+            return false;  // ไม่เหมาะสำหรับ range trading
+            
+        default:
+            return false;
+    }
+}
+// --- สำหรับ Range Trading Strategy ---
+double GetStrongSupportLevel() {
+    // หาระดับ support (ตัวอย่างใช้ recent low)
+    return iLow(_Symbol, PERIOD_H1, iLowest(_Symbol, PERIOD_H1, MODE_LOW, 20, 0));
+}
+
+double GetStrongResistanceLevel() {
+    // หาระดับ resistance (ตัวอย่างใช้ recent high)
+    return iHigh(_Symbol, PERIOD_H1, iHighest(_Symbol, PERIOD_H1, MODE_HIGH, 20, 0));
+}
+
+
+
+double GetDynamicResistanceLevel()
+{
+    int bbHandle = iBands(_Symbol, PERIOD_H1, 20, 2.0, 0, PRICE_CLOSE);
+    if(bbHandle == INVALID_HANDLE) return 0;
+    
+    double bbUpper[1];
+    if(CopyBuffer(bbHandle, 1, 0, 1, bbUpper) <= 0) {
+        IndicatorRelease(bbHandle);
+        return 0;
+    }
+    
+    IndicatorRelease(bbHandle);
+    
+    double recentHigh = iHigh(_Symbol, PERIOD_H1, iHighest(_Symbol, PERIOD_H1, MODE_HIGH, 10, 0));
+    return MathMax(bbUpper[0], recentHigh);
+}
+
+
+
+// แก้ไขฟังก์ชัน ShouldBuyInRange และ ShouldSellInRange
+
+
+
+// ฟังก์ชัน ExecuteRangeBuy/Sell
+void ExecuteRangeBuy(double lotSize, double tpPips, double slPips) {
+    Print("Range Buy: Lot=", lotSize, ", TP=", tpPips, ", SL=", slPips);
+}
+
+void ExecuteRangeSell(double lotSize, double tpPips, double slPips) {
+    Print("Range Sell: Lot=", lotSize, ", TP=", tpPips, ", SL=", slPips);
+}
+bool DetectCalmRangeOpportunity()
+{
+    // Range trading ในภาวะสงบ
+    double support = GetStrongSupportLevel();
+    double resistance = GetStrongResistanceLevel();
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // ตรวจสอบว่า price อยู่ใกล้ขอบ range หรือไม่
+    bool nearSupport = (currentPrice <= support * 1.005);      // ใกล้ support +0.5%
+    bool nearResistance = (currentPrice >= resistance * 0.995); // ใกล้ resistance -0.5%
+    
+    // ตรวจสอบ range width (ต้องกว้างพอ)
+    double rangeWidth = (resistance - support) / support * 100;  // percentage
+    bool rangeWidthOK = (rangeWidth >= 0.5);  // อย่างน้อย 0.5%
+    
+    // ตรวจสอบ volume และ momentum
+    bool volumeOK = IsVolumeLowToModerate();
+    bool momentumOK = !IsStrongMomentumPresent();
+    
+    return ((nearSupport || nearResistance) && rangeWidthOK && volumeOK && momentumOK);
+}
+
+bool DetectVolatileRangeOpportunity()
+{
+    // Range trading ในภาวะ volatile
+    double support = GetDynamicSupportLevel();
+    double resistance = GetDynamicResistanceLevel();
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // ใช้ tighter boundaries ในช่วง volatile
+    bool nearSupport = (currentPrice <= support * 1.002);      // +0.2%
+    bool nearResistance = (currentPrice >= resistance * 0.998); // -0.2%
+    
+    // ต้องการ confirmation มากขึ้นในช่วง volatile
+    bool rsiConfirmation = false;
+    if(nearSupport)
+    {
+        double rsi0 = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+        rsiConfirmation = (rsi0 < 35);  // oversold
+    }
+    else if(nearResistance)
+    {
+        double rsi1 = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE, 0);
+        rsiConfirmation = (rsi1 > 65);  // overbought
+    }
+    
+    // ตรวจสอบ reversal pattern
+    bool reversalPattern = IsReversalCandlePattern();
+    
+    return ((nearSupport || nearResistance) && rsiConfirmation && reversalPattern);
+}
+
+bool DetectWeakTrendRangeOpportunity()
+{
+    // Range trading ใน weak trend (consolidation within trend)
+    
+    // ใช้ iMA() 6 parameters + CopyBuffer
+    int maFastHandle = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);
+    int maSlowHandle = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_SMA, PRICE_CLOSE);
+    
+    double maFastValue = 0, maSlowValue = 0;
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // ดึงค่า MA Fast
+    if(maFastHandle != INVALID_HANDLE) {
+        double maFastBuffer[1];
+        if(CopyBuffer(maFastHandle, 0, 0, 1, maFastBuffer) > 0) {
+            maFastValue = maFastBuffer[0];
+        }
+        IndicatorRelease(maFastHandle);
+    }
+    
+    // ดึงค่า MA Slow
+    if(maSlowHandle != INVALID_HANDLE) {
+        double maSlowBuffer[1];
+        if(CopyBuffer(maSlowHandle, 0, 0, 1, maSlowBuffer) > 0) {
+            maSlowValue = maSlowBuffer[0];
+        }
+        IndicatorRelease(maSlowHandle);
+    }
+    
+    if(maFastValue == 0 || maSlowValue == 0) return false;
+    
+    // ตรวจสอบว่า price เคลื่อนที่ใน sideways channel
+    bool inChannel = IsPriceInChannel(currentPrice, maFastValue, maSlowValue);
+    
+    // ตรวจสอบ oscillation ระหว่าง MAs
+    bool oscillating = IsPriceOscillatingBetweenMAs();
+    
+    // ตรวจสอบ volume pattern (ควรลดลงในช่วง consolidation)
+    bool volumeDecreasing = IsVolumeDecreasing(PERIOD_H1, 5);
+    
+    // Debug info
+    if(DebugPrintLevel >= 2) {
+        Print(StringFormat("WeakTrendRange: Price=%.5f, MA20=%.5f, MA50=%.5f, InChannel=%s, Oscillating=%s, VolumeDecreasing=%s",
+            currentPrice, maFastValue, maSlowValue,
+            (inChannel ? "Yes" : "No"), (oscillating ? "Yes" : "No"), (volumeDecreasing ? "Yes" : "No")));
+    }
+    
+    return (inChannel && oscillating && volumeDecreasing);
+}
+
+// ฟังก์ชัน ExecuteRangeTrade
+void ExecuteRangeTrade(double riskMultiplier, ENUM_MARKET_REGIME_DETAILED regime)
+{
+    Print("Executing Range Trade with risk multiplier: " + DoubleToString(riskMultiplier, 2) + 
+          " for regime: " + RegimeToString(regime));
+    
+    double lotSize = CalculateLotSize() * riskMultiplier;
+    double tpPips = CurrentTakeProfitPips * 0.6;  // TP สั้นสำหรับ range trading
+    double slPips = CurrentStopLossPips * 0.8;    // SL สั้น
+    
+    // ตรวจสอบทิศทาง (ต้องส่งพารามิเตอร์)
+    if(ShouldBuyInRange(regime, lotSize, tpPips))
+    {
+        ExecuteRangeBuy(lotSize, tpPips, slPips);
+    }
+    else if(ShouldSellInRange(regime, lotSize, slPips))
+    {
+        ExecuteRangeSell(lotSize, tpPips, slPips);
+    }
+    else
+    {
+        Print("No range trading opportunity found");
+    }
+}
+double GetStochasticValue(int shift = 0)
+{
+    int handle = iStochastic(_Symbol, PERIOD_M15, 5, 3, 3, MODE_SMA, STO_LOWHIGH);
+    if(handle == INVALID_HANDLE) return 0;
+    
+    double value[1];
+    int copied = CopyBuffer(handle, 0, shift, 1, value); // Buffer 0 = main line
+    IndicatorRelease(handle);
+    
+    return (copied > 0) ? value[0] : 0;
+}
+
+bool ShouldTradeMeanReversionInHighVol()
+{
+    // Mean reversion ในช่วง volatile
+    double rsiValue = GetRSIValue(0);
+    double stochValue = GetStochasticValue(0);
+    
+    // Overbought/oversold ในช่วง volatile
+    bool oversold = (rsiValue < 30 && stochValue < 20);
+    bool overbought = (rsiValue > 70 && stochValue > 80);
+    
+    // Debug info
+    if(DebugPrintLevel >= 2) {
+        Print(StringFormat("MeanReversionCheck: RSI=%.1f, Stochastic=%.1f, Oversold=%s, Overbought=%s",
+            rsiValue, stochValue,
+            (oversold ? "Yes" : "No"), (overbought ? "Yes" : "No")));
+    }
+    
+    return (oversold || overbought);
+}
 void ExecuteNormalStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_NORMAL)
 {
     // Only execute if regime is normal
@@ -12840,33 +14064,51 @@ void ExecuteNormalStrategy(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REGIME_NO
         switch(regime)
         {
             case MARKET_REGIME_TRENDING_STRONG_DETAILED:
-                ExecuteAdvancedBreakout(ENUM_MARKET_REGIME_DETAILED regime);
+                ExecuteAdvancedBreakout(regime);  // แก้: เอา ENUM_MARKET_REGIME_DETAILED ออก
                 break;
             case MARKET_REGIME_RANGING_CALM_DETAILED:
                 ExecuteRangeCalmStrategy();
                 break;
             case MARKET_REGIME_RANGING_VOLATILE_DETAILED:
-                // ExecuteRangeVolatileStrategy(ENUM_MARKET_REGIME_DETAILED regime);
+                ExecuteRangeVolatileStrategy(regime);  // แก้: เรียกใช้ฟังก์ชันที่มีอยู่
                 break;
             case MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED:
-                ExecuteAdvancedBreakout(ENUM_MARKET_REGIME_DETAILED regime);
+                ExecuteAdvancedBreakout(regime);  // แก้: เอา ENUM_MARKET_REGIME_DETAILED ออก
+                break;
+            case MARKET_REGIME_TRENDING_WEAK_DETAILED:
+                ExecuteWeakTrendStrategy(regime);
+                break;
+            case MARKET_REGIME_HIGH_VOLATILITY_DETAILED:
+                ExecuteHighVolatilityStrategy(regime);
+                break;
+            case MARKET_REGIME_NEWS_EVENT_DETAILED:
+                ExecuteNewsEventStrategy(regime);
                 break;
         }
         return;
     }
     
     // Normal regime trading logic
-    Print("Executing NORMAL market strategy");
+    Print("Executing NORMAL market strategy for regime: " + RegimeToString(regime));
     
     // Balanced approach: mix of breakout and range trading
-    if(DetectAdvancedBreakoutSELL(ENUM_MARKET_REGIME_DETAILED regime))
+    if(DetectAdvancedBreakoutSELL(regime))  // แก้: เอา ENUM_MARKET_REGIME_DETAILED ออก
     {
         // Execute with moderate risk
         ExecuteBreakoutSell(0.8); // 80% of normal risk
     }
-    // Add other signals as needed
+    
+    if(DetectAdvancedBreakoutBUY(regime))  // เพิ่ม buy signal ด้วย
+    {
+        ExecuteBreakoutBuy(0.8);
+    }
+    
+    // Add range trading signals
+    if(DetectRangeTradingOpportunity(regime))
+    {
+        ExecuteRangeTrade(0.7, regime); // 70% of normal risk for range trading
+    }
 }
-
 void ResetRecoveryToDefault()
 {
     // คืนค่าทั้งหมดเป็นค่า default จาก input
@@ -15263,9 +16505,9 @@ bool IsMarketGoodForTrading(string symbol)
     StringToUpper(sym);
     
     // 1. ✅ ตรวจสอบ Volatility ด้วย ATR
-    double atr = CalculateATR(14, 0, symbol);
+    double atr0 = CalculateATR(14, 0, symbol);
     double currentPrice = SymbolInfoDouble(symbol, SYMBOL_BID);
-    double atrPercent = (atr / currentPrice) * 100;
+    double atrPercent = (atr0 / currentPrice) * 100;
     
     DebugPrint(3, "Market Check - " + symbol + " | ATR: " + DoubleToString(atrPercent, 3) + "%");
     
@@ -15592,7 +16834,7 @@ void ManageCooperativeStrategies(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REG
     
     // Display real-time status
     Print("=== 🤝 COOPERATIVE PROGRESS: " + DoubleToString(progress, 1) + "% ===");
-    Print("Market Regime: " + EnumToString(ENUM_MARKET_REGIME_DETAILED regime));
+    Print("Market Regime: " + RegimeToString(regime));  // ใช้ฟังก์ชัน RegimeToString()
     Print("Total: $" + DoubleToString(totalCollaborativeProfit, 2) + " / $" + DoubleToString(collaborativeTarget, 2));
     
     for(int i = 0; i < 5; i++) 
@@ -15609,7 +16851,7 @@ void ManageCooperativeStrategies(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REG
     }
     
     // ปรับ cooperative target ตาม market regime
-    AdjustCooperativeTarget(ENUM_MARKET_REGIME_DETAILED regime);
+    AdjustCooperativeTarget(regime);  // เอา ENUM_MARKET_REGIME_DETAILED ออก
     
     // Check for global target achievement
     if(totalCollaborativeProfit >= collaborativeTarget) 
@@ -15618,7 +16860,7 @@ void ManageCooperativeStrategies(ENUM_MARKET_REGIME_DETAILED regime = MARKET_REG
     }
     
     // ปรับกลยุทธ์ cooperative ตาม market regime
-    AdjustCooperativeStrategiesByRegime(ENUM_MARKET_REGIME_DETAILED regime);
+    AdjustCooperativeStrategiesByRegime(regime);  // เอา ENUM_MARKET_REGIME_DETAILED ออก
 }
 // ฟังก์ชันเพิ่มเติม
 void AdjustCooperativeTarget(ENUM_MARKET_REGIME_DETAILED regime)
@@ -15926,10 +17168,10 @@ bool IsMarketRanging() {
         return false;
     }
     
-    double atr = atrArray[0];
+    double atr0 = atrArray[0];
     IndicatorRelease(atrHandle);
     
-    double atrPercent = (atr / SymbolInfoDouble(_Symbol, SYMBOL_BID)) * 100;
+    double atrPercent = (atr0 / SymbolInfoDouble(_Symbol, SYMBOL_BID)) * 100;
     return (atrPercent < 0.08);
 }
 
@@ -15997,8 +17239,8 @@ string GetDetailedMarketStatus()
     
     // 3. 🎯 Market Regime Detection
     ENUM_MARKET_REGIME_DETAILED regime = DetectMarketRegime();
-    string regimeName = GetRegimeName(ENUM_MARKET_REGIME_DETAILED regime);
-    int regimeScore = CalculateRegimeConfidence(ENUM_MARKET_REGIME_DETAILED regime);
+    string regimeName = GetRegimeName(regime);  // เอา ENUM_MARKET_REGIME_DETAILED ออก
+    int regimeScore = CalculateRegimeConfidence(regime);  // เอา ENUM_MARKET_REGIME_DETAILED ออก
     
     status += StringFormat("Market Regime: %s (Confidence: %d/100)\n", regimeName, regimeScore);
     
@@ -16023,13 +17265,15 @@ string GetDetailedMarketStatus()
     status += sessionStatus;
     
     // 9. 🎯 Trading Recommendations
-    string recommendations = GetTradingRecommendations(ENUM_MARKET_REGIME_DETAILED regime);
+    string recommendations = GetTradingRecommendations(regime);  // เอา ENUM_MARKET_REGIME_DETAILED ออก
     status += recommendations;
     
     status += "=== END MARKET REPORT ===\n";
     
     return status;
 }
+
+
 
 //+------------------------------------------------------------------+
 //| Get Multi Timeframe Trend Status                               |
@@ -16165,12 +17409,12 @@ string GetVolumeMomentumStatus()
     status += StringFormat("Volume: %s (%.1fx average)\n", volumeStatus, volumeRatio);
     
     // Momentum indicators - FIXED VERSION
-    double rsi = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+    double rsi0 = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
     string rsiStatusText; // เปลี่ยนเป็น string
     
-    if(rsi > 70) 
+    if(rsi0 > 70) 
         rsiStatusText = "OVERBOUGHT";
-    else if(rsi < 30) 
+    else if(rsi0 < 30) 
         rsiStatusText = "OVERSOLD";
     else 
         rsiStatusText = "NEUTRAL";
@@ -16179,7 +17423,7 @@ string GetVolumeMomentumStatus()
     double adx = GetADXValue(_Symbol, PERIOD_H1, 14);
     string adxStatus = adx > 25 ? "STRONG TREND" : adx > 20 ? "MODERATE TREND" : "WEAK/NO TREND";
     
-    status += StringFormat("RSI(14): %.1f (%s) | ADX: %.1f (%s)\n", rsi, rsiStatusText, adx, adxStatus);
+    status += StringFormat("RSI(14): %.1f (%s) | ADX: %.1f (%s)\n", rsi0, rsiStatusText, adx, adxStatus);
     
     return status;
 }
@@ -16357,7 +17601,7 @@ string GetRecommendedStrategies(ENUM_MARKET_REGIME_DETAILED regime)
 void PrintTradingRecommendations()
 {
     ENUM_MARKET_REGIME_DETAILED currentRegime = DetectMarketRegime();
-    string recommendations = GetTradingRecommendations(ENUM_MARKET_REGIME_DETAILED currentRegime);
+    string recommendations = GetTradingRecommendations(currentRegime);  // เอา ENUM_MARKET_REGIME_DETAILED ออก
     
     Print(recommendations);
     
@@ -16451,42 +17695,61 @@ double GetADXValue(string symbol, ENUM_TIMEFRAMES timeframe, int period, int shi
 //+------------------------------------------------------------------+
 double GetRSISimple(int period = 14, int shift = 0, ENUM_TIMEFRAMES tf = PERIOD_H1)
 {
-    return GetRSIValue(_Symbol, tf, period, PRICE_CLOSE, shift);
+    // ใช้ GetRSIValue() รุ่น 4 parameters
+    return GetRSIValue(_Symbol, tf, period, shift); // ✅ 4 parameters
+    //           symbol   tf   period  shift
 }
-
-double GetRSIValue(string symbol, ENUM_TIMEFRAMES timeframe, int period, int applied_price, int shift = 0)
+// ประกาศฟังก์ชัน GetRSIValue() ที่ชัดเจน (override)
+double GetRSIValue(string symbol, ENUM_TIMEFRAMES tf, int period, int shift)
 {
-    double rsiArray[];
-    ArraySetAsSeries(rsiArray, true);
-    
-    int handle = iRSI(symbol, timeframe, period, applied_price);
+    // Implementation ที่ชัดเจน
+    int handle = iRSI(symbol, tf, period, PRICE_CLOSE);
     if(handle == INVALID_HANDLE) {
-        Print("Error: Cannot create RSI indicator handle");
-        return 50; // Return neutral value on error
+        if(DebugPrintLevel >= 1) {
+            Print("GetRSIValue: Failed to create RSI indicator for ", symbol);
+        }
+        return 50.0; // ค่า default
     }
     
-    int copied = CopyBuffer(handle, 0, shift, 1, rsiArray);
+    double buffer[1];
+    int copied = CopyBuffer(handle, 0, shift, 1, buffer);
     IndicatorRelease(handle);
     
     if(copied <= 0) {
-        Print("Error: Cannot copy RSI buffer");
-        return 50;
+        if(DebugPrintLevel >= 1) {
+            Print("GetRSIValue: Failed to copy RSI buffer for ", symbol);
+        }
+        return 50.0; // ค่า default
     }
     
-    return rsiArray[0];
+    return buffer[0];
 }
+
+// Overload สำหรับ shift เท่านั้น
+double GetRSIValue(int shift)
+{
+    // เรียกฟังก์ชันหลักด้วย default values
+    return GetRSIValue(_Symbol, PERIOD_H1, 14, shift);
+}
+
+// Overload สำหรับ timeframe และ shift
+double GetRSIValue(ENUM_TIMEFRAMES tf, int shift)
+{
+    return GetRSIValue(_Symbol, tf, 14, shift);
+}
+
 bool CheckRSICondition()
 {
     // ใช้เวอร์ชันง่าย
-    double rsi = GetRSISimple(14, 0, PERIOD_H1);
+    double rsi0 = GetRSISimple(14, 0, PERIOD_H1);
     
-    if(rsi > 70) 
+    if(rsi0 > 70) 
     {
         Print("Overbought condition");
         return false;
     }
     
-    if(rsi < 30)
+    if(rsi0 < 30)
     {
         Print("Oversold condition");
         return false;
@@ -16527,6 +17790,23 @@ int CalculateRegimeConfidence(ENUM_MARKET_REGIME_DETAILED regime)
     
     return MathMin(confidence, 100);
 }
+// ประกาศฟังก์ชัน GetRSIValue() รุ่น 5 parameters ก่อน GetSISimple(
+double GetRSIValue(string symbol, ENUM_TIMEFRAMES tf, int period, ENUM_APPLIED_PRICE applied, int shift)
+{
+    int handle = iRSI(symbol, tf, period, applied);
+    if(handle == INVALID_HANDLE) {
+        Print("GetRSIValue(5p) failed");
+        return 50.0;
+    }
+    
+    double buffer[1];
+    int copied = CopyBuffer(handle, 0, shift, 1, buffer);
+    IndicatorRelease(handle);
+    
+    return (copied > 0) ? buffer[0] : 50.0;
+}
+
+
 bool HasMultipleBreakoutConfirmations(bool isBuy)
 {
     int confirmations = 0;
@@ -16549,9 +17829,9 @@ bool HasMultipleBreakoutConfirmations(bool isBuy)
     if(!isBuy && HasBearishBreakoutCandle()) confirmations++;
     
     // 4. Indicator confirmation (RSI) - ใช้ GetRSIValue ของคุณ
-    double rsi = GetRSIValue(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
-    if(isBuy && rsi < 70) confirmations++;      // ไม่ overbought สำหรับ buy
-    if(!isBuy && rsi > 30) confirmations++;     // ไม่ oversold สำหรับ sell
+    double rsi0 = GetRSIValue(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+    if(isBuy && rsi0 < 70) confirmations++;      // ไม่ overbought สำหรับ buy
+    if(!isBuy && rsi0 > 30) confirmations++;     // ไม่ oversold สำหรับ sell
     
     // 5. Trend confirmation (optional)
     if(IsBreakoutWithTrend(isBuy)) confirmations++;
@@ -17037,7 +18317,7 @@ bool IsTrendConsolidation() {
     }
     double avgRange = totalRange / 10.0;
     
-    double atr = GetATRValue(_Symbol, PERIOD_M15, 14);
+    double aatr = GetATRValue(_Symbol, PERIOD_M15, 14);
     double rangePercent = (avgRange / rates[0].close) * 100;
     
     // Range แคบ + อยู่ในเทรนด์ = Consolidation
@@ -17049,13 +18329,13 @@ bool IsTrendExhaustion() {
     if(CopyRates(_Symbol, PERIOD_H1, 0, 5, rates) < 5) return false;
     
     // ตรวจสอบ Divergence ด้วย RSI
-    double rsi = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
+    double rsi0 = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 0);
     double rsi1 = iRSI(_Symbol, PERIOD_H1, 14, PRICE_CLOSE, 1);
     
     // Bearish Divergence: ราคาสูงขึ้นแต่ RSI ต่ำลง
-    bool bearishDivergence = (rates[0].high > rates[1].high && rsi < rsi1);
+    bool bearishDivergence = (rates[0].high > rates[1].high && rsi0 < rsi1);
     // Bullish Divergence: ราคาต่ำลงแต่ RSI สูงขึ้น
-    bool bullishDivergence = (rates[0].low < rates[1].low && rsi > rsi1);
+    bool bullishDivergence = (rates[0].low < rates[1].low && rsi0 > rsi1);
     
     return (bearishDivergence || bullishDivergence);
 }
@@ -17098,7 +18378,127 @@ bool IsDowntrend() {
    
    return emaFastBuffer[0] < emaSlowBuffer[0];
 }
+bool IsRSIReasonable(int timeframe = PERIOD_H1, int shift = 0)
+{
+    // ตรวจสอบว่า RSI อยู่ในช่วงที่เหมาะสมสำหรับการเทรด
+    
+    // ดึงค่า RSI
+    int handle = iRSI(_Symbol, (ENUM_TIMEFRAMES)timeframe, 14, PRICE_CLOSE);
+    
+    // ตรวจสอบค่า validity
+    if(handle <= 0 || handle >= 100) {
+        Print("RSI value invalid: ", handle);
+        return false;
+    }
+    
+    // เงื่อนไข RSI ที่เหมาะสม:
+    // 1. ไม่อยู่ใน extreme overbought/oversold (สำหรับ trend following)
+    bool notExtreme = (handle > 25 && handle < 75);
+    
+    // 2. ไม่อยู่ใน危險 zone สำหรับ reversal
+    bool notDangerZone = !(handle < 20 || handle > 80);
+    
+    // 3. RSI อยู่ในแนวโน้มที่สอดคล้องกับ price
+    double rsiPrev1 = GetRSIValue(_Symbol, (ENUM_TIMEFRAMES)timeframe, 14, shift + 1);
+    double rsiPrev2 = GetRSIValue(_Symbol, (ENUM_TIMEFRAMES)timeframe, 14, shift + 2);
+    
+    bool rsiConsistent = true;
+    if(rsiPrev1 > 0 && rsiPrev2 > 0) {
+        // ตรวจสอบว่า RSI ไม่แกว่งตัวรุนแรง
+        double rsiChange1 = MathAbs(rsi - rsiPrev1);
+        double rsiChange2 = MathAbs(rsiPrev1 - rsiPrev2);
+        rsiConsistent = (rsiChange1 < 15 && rsiChange2 < 15);
+    }
+    
+    // 4. RSI อยู่ในระดับที่สามารถเทรดต่อได้
+    bool rsiReasonableForContinuation = (handle > 40 && handle < 60) || 
+                                       (handle > 30 && handle < 70); // ยืดหยุ่นได้
+    
+    return (notExtreme && notDangerZone && rsiConsistent && rsiReasonableForContinuation);
+}
 
+// Overload สำหรับไม่ต้องระบุ timeframe
+bool IsRSIReasonable()
+{
+    return IsRSIReasonable(PERIOD_H1, 0); // default ใช้ H1
+}
+bool IsVolumeConfirming(int timeframe = PERIOD_H1, int barsToCheck = 3)
+{
+    // ตรวจสอบว่า volume ยืนยัน price movement
+    
+    double ccurrentClose = iClose(_Symbol, timeframe, 0);
+    double prevClose = iClose(_Symbol, timeframe, 1);
+    
+    // หาความแตกต่างของราคา
+    double priceChange = ccurrentClose - prevClose;
+    double priceChangePercent = (MathAbs(priceChange) / prevClose) * 100;
+    
+    // ดึง volume
+    long currentVolume = iVolume(_Symbol, timeframe, 0);
+    long prevVolume1 = iVolume(_Symbol, timeframe, 1);
+    long prevVolume2 = iVolume(_Symbol, timeframe, 2);
+    
+    // คำนวณ average volume
+    long avgVolume = (prevVolume1 + prevVolume2) / 2;
+    
+    // เงื่อนไข volume confirmation:
+    
+    // 1. Volume ปัจจุบันไม่ต่ำเกินไป
+    bool volumeNotTooLow = (currentVolume > avgVolume * 0.5);
+    
+    // 2. Volume ยืนยัน price movement
+    bool volumeConfirmsPrice = true;
+    if(priceChangePercent > 0.1) { // ถ้าราคาเปลี่ยนมากกว่า 0.1%
+        // ต้องการ volume ที่สูงกว่าปกติ
+        volumeConfirmsPrice = (currentVolume > avgVolume * 1.2);
+    }
+    
+    // 3. Volume pattern ไม่ผิดปกติ
+    bool volumePatternOK = true;
+    if(barsToCheck > 1) {
+        // ตรวจสอบว่า volume ไม่ลดลงอย่างรวดเร็ว
+        for(int i = 1; i < MathMin(barsToCheck, 5); i++) {
+            long volCurrent = iVolume(_Symbol, timeframe, i-1);
+            long volPrev = iVolume(_Symbol, timeframe, i);
+            if(volCurrent < volPrev * 0.3) { // ลดลงกว่า 70%
+                volumePatternOK = false;
+                break;
+            }
+        }
+    }
+    
+    // 4. Volume spike ที่เหมาะสม
+    bool volumeSpikeReasonable = (currentVolume < avgVolume * 3.0); // ไม่ spike เกิน 3 เท่า
+    
+    return (volumeNotTooLow && volumeConfirmsPrice && volumePatternOK && volumeSpikeReasonable);
+}
+
+// Overload สำหรับไม่ต้องระบุ parameter
+bool IsVolumeConfirming()
+{
+    return IsVolumeConfirming(PERIOD_H1, 3); // default ใช้ H1, 3 bars
+}
+bool IsWeakUptrendConfirmed()
+{
+    // เงื่อนไขที่เข้มงวดกว่าสำหรับเทรนด์อ่อน
+    return IsUptrend() && IsRSIReasonable() && IsVolumeConfirming();
+}
+bool IsWeakDowntrendConfirmed()
+{
+    return IsDowntrend() && IsRSIReasonable() && IsVolumeConfirming();
+}
+double FindResistanceLevel()
+{
+    // ตรรกะหา resistance level
+    // ตัวอย่างง่ายๆ: ใช้ highest ของ 20 คาบล่าสุด
+    return iHigh(_Symbol, PERIOD_CURRENT, iHighest(_Symbol, PERIOD_CURRENT, MODE_HIGH, 20, 0));
+}
+double FindSupportLevel()
+{
+    // ตรรกะหา support level
+    // ตัวอย่างง่ายๆ: ใช้ lowest ของ 20 คาบล่าสุด
+    return iLow(_Symbol, PERIOD_CURRENT, iLowest(_Symbol, PERIOD_CURRENT, MODE_LOW, 20, 0));
+}
 bool CheckReversalOnTimeframe(ENUM_TIMEFRAMES tf) {
    
     
@@ -17169,12 +18569,12 @@ bool CheckMomentumReversal(ENUM_TIMEFRAMES tf) {
         return false;
     }
     
-    double rsi = rsi_buffer[0];
+    double rrsi = rsi_buffer[0];
     double stochastic = stoch_buffer[0];
     
     // Overbought/oversold with momentum shift
-    bool bullishReversal = (rsi < 30 && stochastic < 20);
-    bool bearishReversal = (rsi > 70 && stochastic > 80);
+    bool bullishReversal = (rrsi < 30 && stochastic < 20);
+    bool bearishReversal = (rrsi > 70 && stochastic > 80);
     
     IndicatorRelease(rsi_handle);
     IndicatorRelease(stoch_handle);
@@ -17255,10 +18655,10 @@ bool IsLowRiskEntry() {
         return false;
     }
     
-    double atr = atrArray[0];
+    double aatr = atrArray[0];
     IndicatorRelease(atrHandle);
     
-    return (spread < atr * 0.1); // Spread ต่ำ compared to ATR
+    return (spread < aatr * 0.1); // Spread ต่ำ compared to ATR
 }
 bool IsBreakoutRetest() {
     MqlRates rates[];
@@ -17806,10 +19206,10 @@ void ExecuteScalp3WithReducedLot(double reducedLot)
     
     double ema9 = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
     double ema21 = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
-    double rsi = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE, 0);
+    double rrsi = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE, 0);
     
-    bool buyCondition = (ema9 > ema21 && rsi > 40 && rsi < 75);
-    bool sellCondition = (ema9 < ema21 && rsi < 60 && rsi > 25);
+    bool buyCondition = (ema9 > ema21 && rrsi > 40 && rrsi < 75);
+    bool sellCondition = (ema9 < ema21 && rrsi < 60 && rrsi > 25);
     
     // 🔥 ใช้ Fixed SL/TP Points (แทนที่จะใช้ตัวแปร input)
     int fixedSLPoints = 30;  // ตั้งค่า fixed
@@ -17866,11 +19266,11 @@ void ExecuteSimpleTrendScalpWithCustomLot(double customLot)
     // ใช้ logic จาก ExecuteSimpleTrendScalp() แต่ใช้ custom lot
     double ema9 = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
     double ema21 = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
-    double rsi = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE, 0);
+    double rrsi = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE, 0);
     
     // เงื่อนไขแบบ reduced (เข้มงวดกว่า)
-    bool buyCondition = (ema9 > ema21 && rsi > 35 && rsi < 80);
-    bool sellCondition = (ema9 < ema21 && rsi < 65 && rsi > 20);
+    bool buyCondition = (ema9 > ema21 && rrsi > 35 && rrsi < 80);
+    bool sellCondition = (ema9 < ema21 && rrsi < 65 && rrsi > 20);
     
     if(buyCondition) {
         // 🔥 ไม่ใช้ SL/TP Points - เปิดออร์เดอร์แบบไม่มี SL/TP
@@ -18609,17 +20009,17 @@ bool FindPullbackEntry(ENUM_ORDER_TYPE orderType)
     bool nearEMA = (distancePercent >= 0.1 && distancePercent <= 0.5);
     
     // ตรวจสอบ RSI สำหรับ confirmation
-    double rsi = iRSI(Symbol(), PERIOD_M5, 14, PRICE_CLOSE, 0);
+    double rrsi = iRSI(Symbol(), PERIOD_M5, 14, PRICE_CLOSE, 0);
     
     if(orderType == ORDER_TYPE_BUY)
     {
         // Buy pullback: RSI ควรจะไม่ oversold เกินไป
-        return nearEMA && (rsi > 40 && rsi < 70);
+        return nearEMA && (rrsi > 40 && rrsi < 70);
     }
     else // SELL
     {
         // Sell pullback: RSI ควรจะไม่ overbought เกินไป
-        return nearEMA && (rsi > 30 && rsi < 60);
+        return nearEMA && (rrsi > 30 && rrsi < 60);
     }
 }
 
@@ -19311,7 +20711,7 @@ bool CheckScalpConditions(string symbol)
         return false;
     }
     
-    double atr = atrBuffer[0];
+    double aatr = atrBuffer[0];
     
     // ดึงราคาปัจจุบัน
     double currentBid;
@@ -19320,7 +20720,7 @@ bool CheckScalpConditions(string symbol)
         return false;
     }
     
-    double atrPercent = (atr / currentBid) * 100;
+    double atrPercent = (aatr / currentBid) * 100;
     
     // คืน resource
     IndicatorRelease(atrHandle);
@@ -19886,8 +21286,8 @@ double CalculateBuyPositionsProfit()
 bool IsBullishSignal()
 {
     // ตรวจสอบ RSI < 30 (Oversold)
-    double rsi = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE, 0);
-    if(rsi != 0 && rsi < 30) return true;
+    double rrsi = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE, 0);
+    if(rrsi != 0 && rrsi < 30) return true;
     
     // ตรวจสอบ Price > EMA (ใช้รูปแบบที่ถูกต้อง)
     double ema[];
@@ -19903,8 +21303,8 @@ bool IsBullishSignal()
 bool IsBearishSignal()
 {
     // ตรวจสอบ RSI > 70 (Overbought)
-    double rsi = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE, 0);
-    if(rsi != 0 && rsi > 70) return true;
+    double rrsi = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE, 0);
+    if(rsi != 0 && rrsi > 70) return true;
     
     // ตรวจสอบ Price < EMA (ใช้รูปแบบที่ถูกต้อง)
     double ema[];
@@ -21271,42 +22671,7 @@ string DetectMarketCondition()
    }
    return "VOLATILE";
 }
-bool IsBreakoutConfirmed(ENUM_MARKET_REGIME_DETAILED marketCondition = MARKET_REGIME_UNKNOWN_DETAILED)
-{
-    // 🔥 หากได้รับพารามิเตอร์เฉพาะให้ตรวจสอบตามนั้น
-    if(marketCondition == MARKET_REGIME_BREAKOUT_POTENTIAL_DETAILED) {
-        Print("🔍 Checking for Breakout Confirmation (POTENTIAL mode)");
-        return CheckBreakoutWithConfirmation(true); // โหมดตรวจสอบแบบละเอียด
-    }
-    
-    // 🔥 การตรวจสอบ Breakout มาตรฐาน
-    double highBuffer[], lowBuffer[];
-    ArraySetAsSeries(highBuffer, true);
-    ArraySetAsSeries(lowBuffer, true);
-    
-    CopyHigh(_Symbol, _Period, 0, 5, highBuffer);
-    CopyLow(_Symbol, _Period, 0, 5, lowBuffer);
-    
-    double currentATR = GetATR();
-    double atrMultiplier = 0.3;
-    
-    // 📊 ตรวจสอบ Breakout ขึ้น
-    bool bullishBreakout = (highBuffer[0] > highBuffer[1] + (currentATR * atrMultiplier));
-    // 📉 ตรวจสอบ Breakout ลง
-    bool bearishBreakout = (lowBuffer[0] < lowBuffer[1] - (currentATR * atrMultiplier));
-    
-    bool isConfirmed = bullishBreakout || bearishBreakout;
-    
-    if(isConfirmed) {
-        string direction = bullishBreakout ? "BULLISH" : "BEARISH";
-        Print("✅ BREAKOUT CONFIRMED | Direction: ", direction, 
-              " | Price: ", bullishBreakout ? highBuffer[0] : lowBuffer[0],
-              " | Previous: ", bullishBreakout ? highBuffer[1] : lowBuffer[1],
-              " | ATR: ", currentATR);
-    }
-    
-    return isConfirmed;
-}
+
 // 🔥 ฟังก์ชันตรวจสอบ breakout แบบละเอียด (สำหรับ POTENTIAL mode)
 bool CheckBreakoutWithConfirmation(bool strictMode = false)
 {
@@ -21367,13 +22732,7 @@ void CheckAndHandleBreakout()
         }
     }
 }
-// 1. ฟังก์ชันวิเคราะห์สภาพตลาด
-int AnalyzeMarketCondition()
-{
-    // ใช้การ detect market regime ที่มีอยู่แล้ว
-    ENUM_MARKET_REGIME_DETAILED regime = DetectMarketRegime();
-    return (int)regime; // แปลงเป็น int
-}
+
 
 // 2. ฟังก์ชันตรวจสอบการยืนยัน breakout
 bool IsBreakoutConfirmed(ENUM_MARKET_REGIME_DETAILED currentRegime)
@@ -21696,10 +23055,10 @@ bool ShouldOpenTrade(ENUM_ORDER_TYPE type, ENUM_MARKET_REGIME_DETAILED regime)
 bool IsNormalMarketConditionGood(ENUM_ORDER_TYPE type)
 {
     // ตรวจสอบ volatility ปกติ
-    ouble atr = GetATRValue(_Symbol, PERIOD_H1, 14, 0);
+    double aatr = GetATRValue(_Symbol, PERIOD_H1, 14, 0);
     double atrAvg = GetATRAverage(50);
     
-    if(atr > atrAvg * 1.8) 
+    if(aatr > atrAvg * 1.8) 
     {
         Print("Too volatile for normal conditions");
         return false;
@@ -21750,11 +23109,11 @@ int GetMaxPositionsForRegime(ENUM_MARKET_REGIME_DETAILED regime)
 // ฟังก์ชันตรวจสอบเงื่อนไขผันผวน
 bool CheckVolatilityConditions(ENUM_ORDER_TYPE type)
 {
-    ouble atr = GetATRValue(_Symbol, PERIOD_H1, 14, 0);
+    double aatr = GetATRValue(_Symbol, PERIOD_H1, 14, 0);
     double atrAvg = GetATRAverage(50);
     
     // ถ้า ATR สูงกว่าค่าเฉลี่ยมากเกินไป
-    if(atr > atrAvg * 2.0) 
+    if(aatr > atrAvg * 2.0) 
     {
         Print("Extreme volatility detected");
         return false;
@@ -22250,8 +23609,8 @@ string TrendToString(ENUM_TREND_DIRECTION trend)
 ENUM_TREND_DIRECTION GetCurrentTrendDirection()
 {
     // ใช้ MA cross หรือ indicator อื่น
-    double maFast = GetMAValue(10);  // Fast MA (10 periods)
-    double maSlow = GetMAValue(50);  // Slow MA (50 periods)
+      double maFast = GetMAValue(_Symbol, PERIOD_CURRENT, 10, 0);  // Fast MA (10 periods)
+    double maSlow = GetMAValue(_Symbol, PERIOD_CURRENT, 50, 0);  // Slow MA (50 periods)
     
     // ใช้ threshold เล็กน้อยเพื่อลด noise
     double threshold = 0.0001; // หรือใช้ค่าที่เหมาะสมกับสกุลเงิน
@@ -22262,7 +23621,8 @@ ENUM_TREND_DIRECTION GetCurrentTrendDirection()
         return TREND_DOWN;
     else
         return TREND_NONE;
-}// =======================================
+}
+// =======================================
 void ExecuteTrendCounterTrade(double emergencyLot)
 {
     if(emergencyLot <= 0) 
@@ -22307,8 +23667,9 @@ void ExecuteTrendCounterTrade(double emergencyLot)
 void OpenCounterBuy(double lot, string comment)
 {
     double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double sl = price - (GetCurrentATR(14) * 3.0); // Wider SL for emergency
-    double tp = price + (GetCurrentATR(14) * 2.0); // Quick TP
+    double aatr = GetCurrentATR(14);
+    double sl = price - (aatr * 3.0); // Wider SL for emergency
+    double tp = price + (aatr * 2.0); // Quick TP
     
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
@@ -22321,8 +23682,10 @@ void OpenCounterBuy(double lot, string comment)
     request.sl = sl;
     request.tp = tp;
     request.deviation = 10;
-    request.magic = MAGIC_EMERGENCY;
+    request.magic = MAGIC_COUNTER; // ใช้ MAGIC_COUNTER ที่มีอยู่
     request.comment = comment;
+    request.type_filling = ORDER_FILLING_FOK;
+    request.type_time = ORDER_TIME_GTC;
     
     if(OrderSend(request, result))
     {
@@ -22335,11 +23698,13 @@ void OpenCounterBuy(double lot, string comment)
     }
 }
 
+// ฟังก์ชัน OpenCounterSell() ด้วย
 void OpenCounterSell(double lot, string comment)
 {
     double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double sl = price + (GetCurrentATR(14) * 3.0);
-    double tp = price - (GetCurrentATR(14) * 2.0);
+    double aatr = GetCurrentATR(14);
+    double sl = price + (aatr * 3.0); // Wider SL for emergency
+    double tp = price - (aatr * 2.0); // Quick TP
     
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
@@ -22352,8 +23717,10 @@ void OpenCounterSell(double lot, string comment)
     request.sl = sl;
     request.tp = tp;
     request.deviation = 10;
-    request.magic = MAGIC_EMERGENCY;
+    request.magic = MAGIC_COUNTER; // ใช้ MAGIC_COUNTER ที่มีอยู่
     request.comment = comment;
+    request.type_filling = ORDER_FILLING_FOK;
+    request.type_time = ORDER_TIME_GTC;
     
     if(OrderSend(request, result))
     {
